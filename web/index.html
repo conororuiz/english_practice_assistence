@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>English Voice Tutor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">Speak<span>up</span></div>
+    <nav>
+      <button id="nav-lesson" class="link active">Lección</button>
+      <button id="nav-progress" class="link">Progreso</button>
+    </nav>
+  </header>
+
+  <main id="view-lesson">
+    <div id="lesson-meta" class="meta">&nbsp;</div>
+
+    <div class="stage">
+      <svg class="ring" viewBox="0 0 200 200" aria-hidden="true">
+        <circle class="ring-bg" cx="100" cy="100" r="92" />
+        <circle id="ring-fg" class="ring-fg" cx="100" cy="100" r="92" />
+      </svg>
+      <div id="orb" class="orb idle"><div class="core"></div></div>
+      <div id="clock" class="clock">10:00</div>
+    </div>
+
+    <div id="status" class="status">Pulsa para empezar tu lección de 10 minutos</div>
+    <div id="phase" class="phase"></div>
+
+    <div id="captions" class="captions">
+      <div id="cap-tutor" class="cap tutor"></div>
+      <div id="cap-user" class="cap user"></div>
+    </div>
+
+    <div class="controls">
+      <button id="start" class="primary">Empezar lección</button>
+      <button id="end" class="ghost hidden">Terminar</button>
+      <button id="cc" class="ghost small" title="Subtítulos">CC</button>
+    </div>
+
+    <div id="debug" class="debug hidden"></div>
+    <div id="banner" class="banner hidden"></div>
+
+    <section id="summary" class="summary hidden"></section>
+  </main>
+
+  <main id="view-progress" class="hidden">
+    <section id="progress"></section>
+  </main>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
