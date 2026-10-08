@@ -68,7 +68,7 @@ class Settings:
     smart_turn_model: str = "smart-turn-v3.2-cpu.onnx"
 
     # --- Lección ---
-    lesson_seconds: int = int(_env("TUTOR_LESSON_SECONDS", "600"))
+    lesson_seconds: int = int(_env("TUTOR_LESSON_SECONDS", "900"))
     # Límite de RAM del proceso (el requisito es 8 GB en total; el backend debe quedarse muy por debajo).
     ram_budget_mb: int = int(_env("TUTOR_RAM_BUDGET_MB", "3500"))
     store_audio: bool = _env("TUTOR_STORE_AUDIO", "0") == "1"

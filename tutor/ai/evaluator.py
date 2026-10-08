@@ -12,6 +12,7 @@ import re
 
 from ..learning.curriculum import GRAMMAR
 from ..learning.planner import LessonPlan
+from ..learning.route import ROUTE_BY_KEY, attempts_structure
 from .llm import LLM
 from .prompts import EVALUATOR_SYSTEM, evaluator_prompt
 from .schemas import DetectedError, ErrorList, StructureUse, TurnEvaluation, VocabUse
@@ -30,7 +31,8 @@ _RULES: list[tuple[str, str, str, str, str, str]] = [
      "verb_tense", "past_simple", "major", "Para algo que ya pasó, usamos el pasado."),
     (r"\bi am agree\b", "I agree", "grammar", "verb_patterns", "major", "Agree es un verbo: I agree, sin am."),
     (r"\bpeople is\b", "people are", "grammar", "present_simple", "minor", "People es plural: people are."),
-    (r"\b(he|she|it) don'?t\b", r"\1 doesn't", "grammar", "present_simple", "major", "Con he/she/it: doesn't."),
+    (r"\b(he|she|it|my (?:wife|husband|boss|manager|brother|sister|mother|mum|mom|father|dad|friend|son|daughter|"
+     r"partner|colleague|team|company|family)) don'?t\b", r"\1 doesn't", "grammar", "present_simple", "major", "Con he/she/it: doesn't."),
     (r"\bexplain me\b", "explain to me", "preposition", "prepositions", "minor", "Se dice explain to me / explain it to me."),
     (r"\bdepends? of\b", "depends on", "preposition", "prepositions", "minor", "Depend va con on."),
     (r"\b(made|make|making) a meeting\b", "had a meeting", "naturalness", "word_choice", "minor", "Con meeting se usa have, no make."),
@@ -40,7 +42,37 @@ _RULES: list[tuple[str, str, str, str, str, str]] = [
      "Para duraciones usamos for, no since."),
     (r"\bmore (better|bigger|easier|worse)\b", r"\1", "grammar", "comparatives", "major", "Better ya es comparativo: sin more."),
     (r"\bthe (life|people|money) is\b", r"\1 is", "article", "articles", "minor", "En general, sin the: life is…, money is…"),
+    # he/she sin -s ("my sister work"), salvo detrás de un auxiliar ("does she work", "can he go", "let her go")
+    (r"(?<!does )(?<!did )(?<!can )(?<!could )(?<!will )(?<!would )(?<!should )(?<!must )(?<!might )(?<!to )"
+     r"(?<!let )(?<!make )(?<!help )(?<!doesn't )(?<!didn't )(?<!don't )"
+     r"\b(he|she|it|my (?:wife|husband|boss|manager|brother|sister|mother|mum|mom|father|dad|friend|son|daughter|"
+     r"partner|colleague|team|company|family))"
+     r" (?:(?:always|usually|often|sometimes|never|also|really|still) )?"
+     r"(work|live|go|like|want|need|start|finish|get|take|make|play|watch|study|drive|teach|help|eat|speak|know|"
+     r"think|come|have|do|love|leave|walk|cook|wake|travel|spend|prefer|enjoy|use|try|deal|manage|buy|check|fix|call|"
+     r"run|sell|clean|open|close|pay|write|send|answer|ask|look|feel|see|say|tell|bring|wear|sleep|listen|stay|move|"
+     r"change|wash|catch|miss|commute|organise|organize|prepare|visit|drink|mean|seem|hate|stop|forget|remember|"
+     r"understand|believe|plan|hope|learn|meet|keep|give|show|lose|win)\b",
+     "{s3}", "grammar", "present_simple", "major", "Con he/she, el verbo en presente lleva -s."),
+    # negación a la española ("I no like", "my boss no work")
+    (r"\b(i|you|we|they) no (work|like|have|go|know|want|need|eat|drink|live|understand|play|speak|drive|watch|use)\b",
+     r"\1 don't \2", "grammar", "present_simple", "major", "Para negar en presente: don't + verbo."),
+    (r"\b(he|she|it|my \w+) no (work|like|have|go|know|want|need|eat|drink|live|understand|play|speak|drive|watch|use)\b",
+     r"\1 doesn't \2", "grammar", "present_simple", "major", "Con he/she, para negar: doesn't + verbo."),
+    # adverbio de frecuencia detrás del verbo ("I go always")
+    (r"\b(i|we|they|you) (?!am\b|are\b|was\b|were\b|'m\b|'re\b)(go|work|eat|play|watch|read|cook|get|do|have|take|visit|call|see|drink|drive|walk) (always|usually|often|sometimes|never)\b",
+     r"\1 \3 \2", "word_order", "frequency_adverbs", "major", "Always, usually, often… van antes del verbo."),
 ]
+
+
+def third_person(verb: str) -> str:
+    if verb == "have":
+        return "has"
+    if verb.endswith(("s", "sh", "ch", "x", "z", "o")):
+        return verb + "es"
+    if verb.endswith("y") and verb[-2:-1] not in "aeiou":
+        return verb[:-1] + "ies"
+    return verb + "s"
 _PP = {"went": "gone", "did": "done", "saw": "seen", "ate": "eaten", "wrote": "written", "took": "taken", "came": "come", "ran": "run"}
 _PAST = {"go": "went", "have": "had", "make": "made", "talk": "talked", "do": "did", "see": "saw", "eat": "ate",
          "work": "worked", "meet": "met", "say": "said", "tell": "told", "buy": "bought"}
@@ -54,6 +86,9 @@ def rule_based_evaluation(text: str, plan: LessonPlan | None = None) -> TurnEval
             corrected = m.expand(repl)
             if "{pp}" in corrected:
                 corrected = corrected.replace("{pp}", _PP.get(m.group(2), m.group(2)))
+            if "{s3}" in corrected:
+                verb = m.groups()[-1]
+                corrected = m.group(0)[: m.end(m.lastindex) - m.start()].rsplit(" ", 1)[0] + " " + third_person(verb)
             if "{past}" in corrected:
                 verb = m.groups()[-1]
                 corrected = corrected.replace("{past}", _PAST.get(verb, verb + "ed"))
@@ -71,6 +106,9 @@ def rule_based_evaluation(text: str, plan: LessonPlan | None = None) -> TurnEval
     if re.search(r"\b(have|has|'ve) (been|gone|done|seen|worked|had|made)\b", low) and not any(
             e.skill_key == "present_perfect" for e in errors):
         structures.append(StructureUse(skill_key="present_perfect", correct=True))
+    unit = ROUTE_BY_KEY.get((plan.unit or {}).get("key", "")) if plan else None
+    if unit and attempts_structure(unit, text) and not any(s.skill_key == unit.skill for s in structures):
+        structures.append(StructureUse(skill_key=unit.skill, correct=True))
     words = len(low.split())
     complexity = 1 if words < 4 else 2 if words < 10 else 3 if words < 25 else 4
     return TurnEvaluation(errors=errors, target_vocab_used=used, structures_used=structures, complexity=complexity,

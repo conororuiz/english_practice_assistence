@@ -93,6 +93,26 @@ CREATE TABLE IF NOT EXISTS vocab (                  -- vocabulario y expresiones
     PRIMARY KEY (user_id, term)
 );
 
+CREATE TABLE IF NOT EXISTS unit_progress (         -- ruta de aprendizaje: progreso por unidad
+    user_id         INTEGER NOT NULL,
+    unit_key        TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'current', -- current | mastered
+    lessons         INTEGER NOT NULL DEFAULT 0,     -- clases dadas de esta unidad
+    correct         REAL NOT NULL DEFAULT 0,        -- usos correctos acumulados de la estructura
+    major           REAL NOT NULL DEFAULT 0,
+    minor           REAL NOT NULL DEFAULT 0,
+    last_correct    REAL NOT NULL DEFAULT 0,        -- lo mismo, sólo en la última clase
+    last_major      REAL NOT NULL DEFAULT 0,
+    last_minor      REAL NOT NULL DEFAULT 0,
+    drills_done     TEXT NOT NULL DEFAULT '[]',     -- ejercicios ya resueltos bien (no se repiten antes que los nuevos)
+    score           REAL NOT NULL DEFAULT 0,        -- 0..100 (100 = dominada)
+    started_at      REAL NOT NULL,
+    last_lesson_at  REAL,
+    mastered_at     REAL,
+    last_review_at  REAL,                           -- repaso de una unidad ya dominada
+    PRIMARY KEY (user_id, unit_key)
+);
+
 CREATE TABLE IF NOT EXISTS vocab_events (
     id              INTEGER PRIMARY KEY,
     user_id         INTEGER NOT NULL,

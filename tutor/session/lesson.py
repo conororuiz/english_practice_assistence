@@ -1,4 +1,4 @@
-"""Orquestador de una lección de 10 minutos.
+"""Orquestador de una clase de 15 minutos con el profesor.
 
 Flujo por trama de audio (32 ms):  micrófono → Silero VAD → TurnDetector → eventos
   PAUSE       → transcribir el segmento (Whisper) + Smart Turn sobre el turno → completitud
@@ -7,8 +7,14 @@ Flujo por trama de audio (32 ms):  micrófono → Silero VAD → TurnDetector �
   RESUMED     → el usuario no había terminado: se descarta la respuesta y el turno sigue abierto
   BARGE_IN    → el usuario habla encima del tutor: se corta el audio y se le cede la palabra
 
-El reloj de la lección es de pared (monotónico) y controla las fases:
-  0-1 warm-up · 1-7 conversación · 7-9 práctica de lo detectado · 9-10 cierre. Fin garantizado ~10:00.
+La clase sigue la unidad actual de la ruta de aprendizaje, en pasos (tiempo + avance real):
+  warmup   ~1 min    saludo (y repaso rápido de una unidad dominada)
+  teach    ~2-3 min  presentación: tema de hoy, regla en español, ejemplos, palabras nuevas (un paso por turno)
+  drill    ~4-5 min  ejercicios guiados, uno por turno; si falla la estructura, lo repite una vez
+  produce  ~4 min    conversación real / role-play usando la estructura y las palabras
+  review   ~1.5 min  repaso de los errores y palabras de hoy
+  wrapup   ~1 min    cierre. Fin garantizado ~15:00.
+El paso nunca retrocede. Si la presentación o los ejercicios terminan antes, se pasa al siguiente paso.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import Protocol
 import numpy as np
 
 from ..ai.conversation import ConversationAgent, SpokenFilter, visible_text
+from ..ai.prompts import drill_note, produce_reminder, teach_steps
 from ..ai.evaluator import Evaluator, asks_for_help, rule_based_evaluation, term_used
 from ..ai.llm import LLM
 from ..ai.summarizer import Summarizer, build_summary_input
@@ -37,6 +44,7 @@ from ..learning.engine import LearningEngine, LiveVocabLog
 from ..learning.fluency import turn_metrics
 from ..learning.memory import UserMemory
 from ..learning.planner import plan_next_lesson
+from ..learning.route import ROUTE_BY_KEY, drill_asked, error_is_unit_related
 from .models import Models
 
 log = logging.getLogger(__name__)
@@ -44,6 +52,9 @@ log = logging.getLogger(__name__)
 PREROLL_FRAMES = 19  # ~0.6 s de audio previo al inicio detectado de la voz
 GRACE_HOLD_S = 0.8  # si el fin de turno es dudoso, el tutor no suena antes de este margen (el alumno puede retomar)
 AUDIO_CHUNK_SAMPLES = OUTPUT_SR // 2  # trozos de 0.5 s hacia el navegador
+PHASE_ORDER = ("warmup", "teach", "drill", "produce", "review", "wrapup")
+# Límites de tiempo de cada paso (fracción de la clase): el paso cambia al llegar aquí aunque no haya terminado.
+PHASE_END = {"warmup": 0.07, "teach": 0.27, "drill": 0.55, "produce": 0.82, "review": 0.93}
 
 
 class Transport(Protocol):
@@ -122,6 +133,22 @@ class LessonSession:
         self.last_fix_turn = -10
         self.next_notes: list[str] = []
         self.pending_focus: list[str] = []
+        # Pasos de la clase
+        self.unit = ROUTE_BY_KEY.get((self.plan.unit or {}).get("key", ""))
+        self.phase_floor = 0  # índice en PHASE_ORDER: el paso nunca retrocede
+        self.warmup_replies = 0
+        self.teach = teach_steps(self.plan)
+        self.teach_step = 0
+        self.drills = list(self.plan.drills)
+        self.drill_pos = 0
+        self.drill_is_asked = False  # el ejercicio drills[drill_pos] ya se ha planteado y el alumno debe responderlo
+        self.drill_retry = False  # el alumno está repitiendo el ejercicio tras una corrección
+        self.drill_ask_tries = 0
+        self.talk = list(self.plan.talk)
+        self.talk_pos = 0  # pregunta de conversación que toca plantear
+        self.talk_follow_ups = 0  # repreguntas sobre la pregunta actual
+        self.review_pos = 0
+        self.review_retry = False
         self.ending = False
         self.finished = False
         self._clock_task: asyncio.Task | None = None
@@ -133,11 +160,16 @@ class LessonSession:
 
     async def start(self) -> None:
         self.t0 = time.monotonic()
+        u = self.plan.unit or {}
         await self.t.send_json({"type": "lesson", "plan": {
             "lesson_number": self.plan.lesson_number, "week": self.plan.week, "title": self.plan.title,
             "domain": self.plan.domain, "weekly_goal": self.plan.weekly_goal,
             "grammar": [g["name"] for g in self.plan.target_grammar],
             "new_vocab": self.plan.new_vocab, "review_vocab": self.plan.review_vocab,
+            "unit": {"number": self.plan.unit_number, "count": self.plan.unit_count, "lesson": self.plan.unit_lesson,
+                     "title": u.get("title"), "title_es": u.get("title_es"), "goal": u.get("goal"),
+                     "form": u.get("form"), "examples": u.get("examples"),
+                     "score": self.plan.unit_status.get("score", 0)} if u else None,
         }, "level": self.snapshot["level"], "total": self.s.lesson_seconds})
         self._clock_task = _spawn(self._clock_loop())
         self._start_reply("(The learner has joined the voice lesson and is ready.)", user_turn=None)
@@ -278,32 +310,129 @@ class LessonSession:
 
     # ------------------------------------------------------------------ respuestas del tutor
     def _phase(self) -> str:
-        e = self.elapsed()
-        total = self.s.lesson_seconds
-        if e < total * 0.1:
-            return "warmup"
-        if e < total * 0.7:
-            return "main"
-        flowing = self.user_turns and self.user_turns[-1]["audio"]["words"] >= 20
-        if e < total * 0.75 and flowing and self.agent.last_phase == "main":
-            return "main"  # la conversación va bien: se alarga un poco antes de pasar a práctica
-        if e < total * 0.9:
-            return "practice"
-        return "wrapup"
+        e = self.elapsed() / self.s.lesson_seconds
+        if e >= PHASE_END["review"]:
+            phase = "wrapup"
+        elif e >= PHASE_END["produce"]:
+            flowing = self.user_turns and self.user_turns[-1]["audio"]["words"] >= 20
+            phase = "produce" if e < PHASE_END["produce"] + 0.04 and flowing and self.agent.last_phase == "produce" \
+                else "review"  # la conversación va bien: se alarga un poco antes del repaso
+        elif e >= PHASE_END["drill"] or self.drill_pos >= len(self.drills) or (
+                self.drill_pos == len(self.drills) - 1 and self.drill_is_asked and not self.drill_retry):
+            phase = "produce"  # (o el alumno está respondiendo al último ejercicio: la respuesta ya abre la conversación)
+        elif e >= PHASE_END["teach"] or self.teach_step >= len(self.teach):
+            phase = "drill"
+        elif e >= PHASE_END["warmup"] or self.warmup_replies >= (2 if self.plan.review_unit else 1):
+            phase = "teach"
+        else:
+            phase = "warmup"
+        # nunca se vuelve a un paso anterior; y un paso sin contenido se salta
+        idx = max(PHASE_ORDER.index(phase), self.phase_floor)
+        if PHASE_ORDER[idx] == "teach" and self.teach_step >= len(self.teach):
+            idx += 1
+        if PHASE_ORDER[idx] == "drill" and self.drill_pos >= len(self.drills):
+            idx += 1
+        return PHASE_ORDER[idx]
+
+    def _unit_error(self, e: dict) -> bool:
+        return self.unit is not None and error_is_unit_related(self.unit, e)
+
+    def _drill_results(self) -> tuple[int, int]:
+        """(ejercicios bien, ejercicios respondidos) con las evaluaciones disponibles."""
+        done = [t for t in self.user_turns if t.get("drill") and t.get("eval")]
+        ok = sum(1 for t in done if not any(self._unit_error(e) for e in t["eval"].get("errors", [])))
+        return ok, len(done)
 
     def _practice_items(self) -> list[str]:
-        items, seen = [], set()
+        unit_items, other, seen = [], [], set()
         for t in self.user_turns:
             for e in (t.get("eval") or {}).get("errors", []):
                 key = e["original"].lower()
-                if e["severity"] == "major" and key not in seen:
+                if key in seen:
+                    continue
+                if self._unit_error(e):
                     seen.add(key)
-                    items.append(f"Error: \"{e['original']}\" → \"{e['corrected']}\" ({e['skill_key']})")
-        items = items[:2]
+                    unit_items.append(f"Today's structure: \"{e['original']}\" → \"{e['corrected']}\"")
+                elif e["severity"] == "major":
+                    seen.add(key)
+                    other.append(f"Error: \"{e['original']}\" → \"{e['corrected']}\" ({e['skill_key']})")
+        items = (unit_items[:2] + other)[:3]
         for term in self.vocab.introduced:
-            if term not in self.vocab.used and len(items) < 4:
-                items.append(f"Vocabulary not yet used by the learner: '{term}'")
+            if term not in self.vocab.used and len(items) < 5:
+                items.append(f"Today's word not yet used by the learner: '{term}'")
+        if not unit_items and self.unit:
+            items.append(f"One more quick question that needs today's structure ({self.unit.form.split(' · ')[0]})")
         return items
+
+    def _quick_errors(self, text: str) -> list[dict]:
+        """Comprobación instantánea con reglas (la evaluación con el LLM llega después): errores seguros."""
+        if not text or asks_for_help(text):
+            return []
+        return [e.model_dump() for e in rule_based_evaluation(text, self.plan).errors]
+
+    def _step_notes(self, phase: str, user_text: str) -> list[str]:
+        """Instrucción concreta del paso actual (presentación / ejercicios). No modifica el estado."""
+        if phase == "teach" and self.teach_step < len(self.teach):
+            prefix = "React briefly to what they just said, then: " if self.teach_step == 0 and self.user_turns else ""
+            return [f"[Presentation, part {self.teach_step + 1} of {len(self.teach)}. {prefix}{self.teach[self.teach_step]}]"]
+        if phase == "drill" and self.drill_pos < len(self.drills):
+            drill = self.drills[self.drill_pos]
+            nxt = self.drills[self.drill_pos + 1] if self.drill_pos + 1 < len(self.drills) else None
+            if self.drill_is_asked and asks_for_help(user_text):
+                return [f"[The learner didn't understand the exercise \"{drill}\". Explain it again more simply, with an "
+                        "example answer, and ask them to try.]"]
+            found = ""
+            if self.drill_is_asked:
+                errs = sorted(self._quick_errors(user_text), key=lambda e: not self._unit_error(e))
+                if errs:
+                    found = f"\"{errs[0]['original']}\" → \"{errs[0]['corrected']}\" ({errs[0]['explanation_es']})"
+            note = drill_note(drill, nxt, self.drill_is_asked, self.drill_retry, self.drill_pos + 1, len(self.drills),
+                              found)
+            if not self.drill_is_asked and self.agent.last_phase != "drill":
+                note = ("[Make a short transition: \"Now let's practise.\" Then react briefly to what they just said and "
+                        + note[1:])
+            return [note]
+        return []
+
+    def _advance_steps(self, r: Reply, spoken: str) -> None:
+        """Tras una respuesta del profesor: avanza la presentación o el ejercicio según lo que realmente dijo."""
+        if r.phase == "warmup":
+            self.warmup_replies += 1
+        elif r.phase == "teach":
+            self.teach_step += 1
+        elif r.phase == "drill" and self.drill_pos < len(self.drills):
+            last_user = self.user_turns[-1]["text"] if self.user_turns and r.user_turn is not None else ""
+            drill = self.drills[self.drill_pos]
+            nxt = self.drills[self.drill_pos + 1] if self.drill_pos + 1 < len(self.drills) else None
+            if not self.drill_is_asked:
+                self.drill_ask_tries += 1
+                if drill_asked(drill, spoken) or self.drill_ask_tries >= 2:
+                    self.drill_is_asked, self.drill_ask_tries = True, 0
+            elif last_user and asks_for_help(last_user):
+                pass  # se explicó otra vez el mismo ejercicio
+            elif self.drill_retry or nxt is None or drill_asked(nxt, spoken):
+                self.drill_pos += 1
+                self.drill_retry = False
+                self.drill_is_asked = nxt is not None  # la nota pedía plantear el siguiente en esta misma respuesta
+            else:
+                self.drill_retry = True  # el profesor corrigió y pidió repetir
+        elif r.phase == "produce" and self.talk_pos < len(self.talk):
+            if drill_asked(self.talk[self.talk_pos], spoken):
+                self.talk_pos += 1
+                self.talk_follow_ups = 0
+            else:
+                self.talk_follow_ups += 1
+        elif r.phase == "review":
+            last = self.user_turns[-1]["text"] if self.user_turns and r.user_turn is not None else ""
+            wrong = any(self._unit_error(e) for e in self._quick_errors(last))
+            if wrong and not self.review_retry:
+                self.review_retry = True  # se pidió repetir: el ítem no avanza
+            else:
+                self.review_retry = False
+                self.review_pos += 1
+        if r.phase != "drill":
+            self.drill_is_asked = False
+            self.drill_retry = False
 
     def _turn_notes(self, user_turn: dict | None, phase: str) -> list[str]:
         notes = list(self.next_notes)
@@ -325,18 +454,65 @@ class LessonSession:
                              "or suggest replacements for these words; if the meaning isn't clear, ask what they meant.]")
         if self.turn_idx - self.last_fix_turn <= 1:
             notes.append("[You corrected something in your previous turn: let this turn flow unless an error blocks understanding.]")
-        elif self.pending_focus and self.plan.correction_intensity != "light" and phase in ("main", "practice"):
+        elif self.pending_focus and phase in ("produce", "review") and (
+                self.plan.correction_intensity != "light" or any("Today's structure" in f for f in self.pending_focus)):
             notes.append("[From the learner's recent answers (not corrected yet): " + "; ".join(self.pending_focus[:2])
                          + ". Recast ONE of them briefly if it fits naturally.]")
             self.pending_focus.clear()
-        if phase == "main" and self.elapsed() > self.s.lesson_seconds * 0.5:
+        if phase in ("drill", "produce"):
             missing = [v["term"] for v in self.plan.new_vocab if v["term"].lower() not in self.vocab.introduced]
             if missing:
-                notes.append(f"[New vocabulary still to introduce: {', '.join(missing)}]")
+                notes.append(f"[Today's words still to introduce (teach one when it fits): {', '.join(missing)}]")
+        review_error = False
+        if phase in ("produce", "review") and user_turn:
+            errs = self._quick_errors(user_turn.get("text", ""))
+            unit_errs = [e for e in errs if self._unit_error(e)]
+            if unit_errs and phase == "review" and not self.review_retry:
+                e = unit_errs[0]
+                review_error = True
+                notes.append(f"[Their answer has a mistake with today's structure: \"{e['original']}\" → "
+                             f"\"{e['corrected']}\". Do NOT praise it. Say the correct sentence and ask them to say it "
+                             "again.]")
+            elif unit_errs:
+                e = unit_errs[0]
+                notes.append(f"[Their answer has a mistake with today's structure: \"{e['original']}\" → "
+                             f"\"{e['corrected']}\". Do NOT say it was perfect; recast it briefly and continue.]")
+            elif errs and self.turn_idx - self.last_fix_turn > 1:
+                e = errs[0]
+                notes.append(f"[Their answer has a clear mistake: \"{e['original']}\" → \"{e['corrected']}\". "
+                             "Recast it briefly if it fits, then continue.]")
+        # Al pasar de un paso a otro (presentación, inicio de los ejercicios) también se revisa la última respuesta.
+        if user_turn and (phase == "teach" or (phase == "drill" and not self.drill_is_asked)):
+            errs = self._quick_errors(user_turn.get("text", ""))
+            notes.append(f"[Their last answer has a mistake: \"{errs[0]['original']}\" → \"{errs[0]['corrected']}\" "
+                         f"(<es>{errs[0]['explanation_es']}</es>). Do NOT praise it as correct; give the correct form "
+                         "briefly.]" if errs else
+                         "[No clear mistake detected in their answer: praise it briefly, don't invent a correction.]")
+        if phase == "produce":
+            left = (PHASE_END["produce"] * self.s.lesson_seconds - self.elapsed()) / 60
+            question = self.talk[self.talk_pos] if self.talk_pos < len(self.talk) else None
+            if self.agent.last_phase != "produce":
+                if question:
+                    notes.append(f"[Start the conversation with this question: \"{question}\"]")
+            else:
+                notes.append(produce_reminder(self.plan, question, self.talk_follow_ups, left))
+        if phase == "review" and not review_error:
+            items = self._practice_items()
+            if items:
+                notes.append(f"[Review item for this turn (react to their last answer first): "
+                             f"{items[self.review_pos % len(items)]}]")
+            unused = [t for t in self.vocab.introduced if t not in self.vocab.used]
+            if unused:
+                notes.append(f"[Today's words the learner hasn't used yet: {', '.join(unused[:4])}. Ask a question "
+                             "that makes them use one.]")
+        notes.extend(self._step_notes(phase, (user_turn or {}).get("text", "")))
         return notes
 
     def _start_reply(self, user_text: str, user_turn: dict | None, speculative: bool = False, hold: float = 0.0) -> None:
         phase = self._phase()
+        if phase == "wrapup":
+            ok, tried = self._drill_results()
+            self.agent.progress_hint = f" (today they got {ok} of {tried} exercises right)" if tried else ""
         if speculative:
             notes = self._peek_notes(phase)
         else:
@@ -378,7 +554,8 @@ class LessonSession:
                 await queue.put(None)
 
         producer = _spawn(produce())
-        spoken_filter = SpokenFilter(self.plan.all_target_terms, allow_question=r.rescue)
+        spoken_filter = SpokenFilter(self.plan.all_target_terms, allow_question=r.rescue,
+                                     teaching=r.phase == "teach")
         try:
             while True:
                 sentence = await queue.get()
@@ -428,6 +605,7 @@ class LessonSession:
         """Punto de no retorno: la respuesta empieza a sonar. Se confirma el turno del usuario."""
         r.audible = True
         r.audible_at = time.monotonic()
+        self.phase_floor = max(self.phase_floor, PHASE_ORDER.index(r.phase))
         self.tutor_speaking = True
         self.detector.stop_listening()
         self.capturing = False
@@ -438,6 +616,8 @@ class LessonSession:
         await self.t.send_json({"type": "state", "state": "tutor_speaking", "phase": r.phase})
 
     def _commit_user_turn(self, ut: dict) -> None:
+        if self.drill_is_asked and self.drill_pos < len(self.drills):
+            ut["drill"] = self.drills[self.drill_pos]  # respuesta a un ejercicio guiado
         self.turn_idx += 1
         ut["idx"] = self.turn_idx
         ut["turn_id"] = self.db.add_turn(self.session_id, self.turn_idx, "user", ut["text"], self._phase(),
@@ -466,8 +646,12 @@ class LessonSession:
         recurring = {m["original"].lower() for m in self.plan.recurring_mistakes}
         target_skills = {g["key"] for g in self.plan.target_grammar}
         for e in d["errors"]:
-            if e["severity"] == "major" and (e["original"].lower() in recurring or e["skill_key"] in target_skills
-                                             or self.memory.pattern_count(e["original"], e["corrected"]) >= 1):
+            if ut.get("drill"):
+                continue  # en los ejercicios el profesor ya corrige la respuesta en el momento
+            if self._unit_error(e):
+                self.pending_focus.append(f"Today's structure: \"{e['original']}\" → \"{e['corrected']}\"")
+            elif e["severity"] == "major" and (e["original"].lower() in recurring or e["skill_key"] in target_skills
+                                               or self.memory.pattern_count(e["original"], e["corrected"]) >= 1):
                 self.pending_focus.append(f"\"{e['original']}\" → \"{e['corrected']}\"")
         await self.t.send_json({"type": "turn_eval", "idx": ut["idx"],
                                 "errors": [{"original": e["original"], "corrected": e["corrected"], "severity": e["severity"]}
@@ -505,6 +689,8 @@ class LessonSession:
                 self.last_fix_turn = self.turn_idx
         tagged = {e.attrs.get("term", "").lower() for e in events if e.kind in ("vocab", "elicit")}
         self._detect_vocab(visible_text(" ".join(r.spoken)), tagged)
+        if r.audible or not interrupted:
+            self._advance_steps(r, visible_text(" ".join(r.spoken) or r.raw))
         if re.search(r"more natural|you can say|we say|instead of|better to say", visible_text(" ".join(r.spoken)), re.I) \
                 and not any(e.kind == "fix" for e in events):
             self.last_fix_turn = self.turn_idx  # corrección sin etiqueta: también cuenta para dosificar
@@ -573,7 +759,7 @@ class LessonSession:
                 self.ending = True
                 self.detector.stop_listening()
                 self._start_reply("(Time is almost up.)", user_turn=None)
-            # Límite duro: nunca más de ~25 s por encima de los 10 minutos.
+            # Límite duro: nunca más de ~25 s por encima de la duración de la clase.
             if e >= total + 25 and not self.finished:
                 await self._hard_stop()
                 return
@@ -642,7 +828,9 @@ class LessonSession:
         self.summary = {**summary.model_dump(), "level": metrics["level"], "fluency_index": metrics["fluency_index"],
                         "fluency_trend": metrics["fluency_trend"], "lesson_number": self.plan.lesson_number,
                         "fluency": metrics["fluency"], "duration_s": metrics["duration_s"], "reason": reason,
-                        "next_lesson": next_plan.title}
+                        "next_lesson": next_plan.title, "unit": metrics.get("unit"),
+                        "next_unit": {"title": next_plan.title, "number": next_plan.unit_number,
+                                      "lesson": next_plan.unit_lesson}}
         self.db.finish_session(self.session_id, metrics, self.summary)
         await self.t.send_json({"type": "summary", "summary": self.summary})
 

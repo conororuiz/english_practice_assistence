@@ -161,6 +161,61 @@ class UserMemory:
                           (self.user_id, pattern_key(original, corrected)))
         return int(row["n"]) if row else 0
 
+    # --- ruta de aprendizaje ---------------------------------------------
+    def unit_progress(self, unit_key: str) -> dict | None:
+        row = self.db.one("SELECT * FROM unit_progress WHERE user_id=? AND unit_key=?", (self.user_id, unit_key))
+        if row is None:
+            return None
+        d = dict(row)
+        d["drills_done"] = json.loads(d["drills_done"] or "[]")
+        return d
+
+    def all_unit_progress(self) -> dict[str, dict]:
+        out = {}
+        for r in self.db.q("SELECT unit_key FROM unit_progress WHERE user_id=?", (self.user_id,)):
+            out[r["unit_key"]] = self.unit_progress(r["unit_key"])
+        return out
+
+    def current_unit_key(self) -> str:
+        """Primera unidad de la ruta que aún no está dominada."""
+        from .route import ROUTE
+        done = {k for k, p in self.all_unit_progress().items() if p["status"] == "mastered"}
+        for u in ROUTE:
+            if u.key not in done:
+                return u.key
+        return ROUTE[-1].key
+
+    def save_unit_progress(self, unit_key: str, **fields) -> None:
+        now = time.time()
+        if self.unit_progress(unit_key) is None:
+            self.db.ex("INSERT INTO unit_progress(user_id, unit_key, started_at) VALUES(?,?,?)",
+                       (self.user_id, unit_key, fields.pop("started_at", now)))
+        if fields:
+            cols = ", ".join(f"{k}=?" for k in fields)
+            vals = tuple(json.dumps(v) if isinstance(v, (list, dict)) else v for v in fields.values())
+            self.db.ex(f"UPDATE unit_progress SET {cols} WHERE user_id=? AND unit_key=?", (*vals, self.user_id, unit_key))
+
+    def unit_words_used(self, terms: list[str] | tuple[str, ...]) -> int:
+        """Palabras de la unidad que el alumno ya ha usado (provocadas o espontáneas)."""
+        wanted = [t.lower() for t in terms]
+        if not wanted:
+            return 0
+        marks = ",".join("?" * len(wanted))
+        row = self.db.one(f"SELECT COUNT(*) AS n FROM vocab WHERE user_id=? AND term IN ({marks}) "
+                          "AND prompted_uses + spontaneous_uses > 0", (self.user_id, *wanted))
+        return int(row["n"]) if row else 0
+
+    def unit_words_state(self, terms: list[str] | tuple[str, ...]) -> dict[str, str]:
+        """término → 'unseen' | 'introduced' (presentada, sin usar) | 'used'."""
+        out = {}
+        for t in terms:
+            item = self.vocab_item(t)
+            if item is None:
+                out[t.lower()] = "unseen"
+            else:
+                out[t.lower()] = "used" if item["prompted_uses"] + item["spontaneous_uses"] > 0 else "introduced"
+        return out
+
     # --- resumen para prompts y UI --------------------------------------
     def snapshot(self) -> dict:
         level, score = self.level()

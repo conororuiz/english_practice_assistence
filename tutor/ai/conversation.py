@@ -70,7 +70,7 @@ class StreamParser:
 
 
 _TEACHING_CUE = re.compile(
-    r"natural|we say|you can say|you could say|useful (word|expression|phrase)|means|instead of|correct|remember|"
+    r"natural|we say|rule|with he|with she|verb|tense|you can say|you could say|useful (word|expression|phrase)|means|instead of|correct|remember|"
     r"try (saying|to say)|better to say|careful|<fix|<vocab", re.I)
 _ES_SPAN = re.compile(r"<es>(.*?)</es>", re.S)
 
@@ -82,22 +82,27 @@ class SpokenFilter:
       sin relación con una corrección o una palabra nueva (salvo traducir la pregunta si el alumno no la entendió),
       y como máximo se deja uno por respuesta."""
 
-    def __init__(self, target_terms: list[str], allow_question: bool = False):
+    def __init__(self, target_terms: list[str], allow_question: bool = False, teaching: bool = False):
         self.terms = [t.lower() for t in target_terms]
         self.allow_question = allow_question  # el alumno no entendió: vale traducir la pregunta (una vez)
+        self.teaching = teaching  # explicando la regla del día: se permiten dos frases en español, algo más largas
+        self.max_spans = 2 if teaching else 1
+        self.max_words = 35 if teaching else 20
         self.kept_spanish = 0
         self.prev = ""
 
     def __call__(self, sentence: str) -> str:
         s = re.sub(r"(\*\*|__|\*|`)", "", sentence)
         s = re.sub(r"^\s*([-•]|\d+\.)\s+", "", s)
+        s = re.sub(r"\((?:pause|pauses|smiles?|laughs?|wait[a-z ]*|[A-Z][a-z]+(?: [a-z]+){0,3})\)\s*", "", s)  # acotaciones
 
         def keep(m: re.Match) -> str:
             inner = m.group(1).strip()
             context = (self.prev + " " + s).lower()
-            teaching = bool(_TEACHING_CUE.search(context)) or any(t in context for t in self.terms)
+            teaching = self.teaching or bool(_TEACHING_CUE.search(context)) or any(t in context for t in self.terms)
             rescue = self.allow_question and inner.endswith("?")
-            if self.kept_spanish >= 1 or len(inner.split()) > 20 or (not rescue and (inner.endswith("?") or not teaching)):
+            if self.kept_spanish >= self.max_spans or len(inner.split()) > self.max_words or \
+                    (not rescue and (inner.endswith("?") or not teaching)):
                 return ""
             self.kept_spanish += 1
             return m.group(0)
@@ -117,6 +122,33 @@ def fmt_clock(seconds: float) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
+# Contexto de Ollama: 8192 tokens. El historial se recorta de golpe (no turno a turno) para que el prefijo del
+# prompt siga siendo el mismo la mayoría de turnos y el servidor pueda reutilizar su caché.
+HISTORY_MAX_CHARS = 16000  # ~4000 tokens
+HISTORY_KEEP_CHARS = 7000
+
+
+def compact_history(messages: list[dict]) -> list[dict]:
+    def size(m: dict) -> int:
+        c = m["content"]
+        return len(c) if isinstance(c, str) else sum(len(b.get("text", "")) for b in c if isinstance(b, dict))
+
+    if sum(size(m) for m in messages) <= HISTORY_MAX_CHARS:
+        return messages
+    kept: list[dict] = []
+    total = 0
+    for m in reversed(messages):
+        total += size(m)
+        if total > HISTORY_KEEP_CHARS:
+            break
+        kept.append(m)
+    kept.reverse()
+    while kept and kept[0]["role"] != "user":  # el historial empieza siempre por un turno del alumno
+        kept.pop(0)
+    # las notas antiguas ya no sirven: se quitan las de sistema salvo las del final
+    return [m for i, m in enumerate(kept) if m["role"] != "system" or i >= len(kept) - 6]
+
+
 class ConversationAgent:
     def __init__(self, llm: LLM, plan: LessonPlan, snapshot: dict, lesson_seconds: int):
         self.llm = llm
@@ -126,14 +158,18 @@ class ConversationAgent:
         self.messages: list[dict] = []
         self.last_phase: str | None = None
         self.last_tutor_text = ""
+        self.progress_hint = ""  # para el cierre: cómo van los ejercicios de hoy
 
     def build_request(self, user_text: str, elapsed: float, phase: str, extra_notes: list[str],
                       practice_items: list[str]) -> list[dict]:
         """Mensajes candidatos para la próxima respuesta (no modifica el historial hasta `commit`)."""
-        note = [f"[Lesson clock {fmt_clock(elapsed)} of {fmt_clock(self.lesson_seconds)} · phase={phase}]"]
-        if phase != self.last_phase or phase in ("practice", "wrapup"):
-            note.append(phase_instruction(phase, self.plan, practice_items))
+        # Sin reloj: el orquestador decide cuándo cambia el paso (con el reloj a la vista, un modelo pequeño tiende a
+        # despedirse antes de tiempo).
+        note = [f"[Class step: phase={phase}]"]
+        if phase != self.last_phase or phase in ("review", "wrapup"):
+            note.append(phase_instruction(phase, self.plan, practice_items, self.progress_hint))
         note.extend(extra_notes)
+        self.messages = compact_history(self.messages)
         return self.messages + [
             {"role": "user", "content": user_text},
             {"role": "system", "content": "\n".join(note)},

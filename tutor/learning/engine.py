@@ -17,6 +17,9 @@ from .curriculum import GRAMMAR
 from .fluency import fluency_index, session_fluency
 from .memory import UserMemory
 from .planner import LessonPlan
+from .route import ROUTE_BY_KEY, attempts_structure, error_is_unit_related, unit_status
+
+RECENCY_DECAY = 0.5
 
 
 @dataclass
@@ -168,11 +171,58 @@ class LearningEngine:
             mem.set_level(0.85 * score + 0.15 * observed)
         metrics["level"] = mem.level()[0]
 
-        # 5. Perfil: mejoras recientes (el planner las usa para reducir correcciones de ese tema)
+        # 5. Ruta de aprendizaje: dominio de la unidad (no se avanza hasta dominarla)
+        if plan.unit:
+            metrics["unit"] = self._update_unit(plan, user_turns, now)
+
+        # 6. Perfil: mejoras recientes (el planner las usa para reducir correcciones de ese tema)
         profile = mem.profile()
         profile["recent_improvements"] = improvements
         mem.save_profile(profile)
         return metrics
+
+    def _update_unit(self, plan: LessonPlan, user_turns: list[dict], now: float) -> dict:
+        mem = self.memory
+        unit = ROUTE_BY_KEY[plan.unit["key"]]
+        correct = major = minor = 0.0
+        drills_ok: set[str] = set()
+        drills_tried: set[str] = set()
+        for t in user_turns:
+            ev = t.get("eval")
+            if not ev or ev.get("likely_asr_issue") or not ev.get("understood_question", True):
+                continue
+            errs = [e for e in ev.get("errors", []) if error_is_unit_related(unit, e)]
+            major += sum(1 for e in errs if e["severity"] == "major")
+            minor += sum(1 for e in errs if e["severity"] != "major")
+            drill = t.get("drill")
+            if drill:
+                drills_tried.add(drill)
+            if (drill or attempts_structure(unit, t["text"])) and not errs:
+                correct += 1
+                if drill and len(t["text"].split()) >= 3:
+                    drills_ok.add(drill)
+        p = mem.unit_progress(unit.key) or {"lessons": 0, "correct": 0, "major": 0, "minor": 0, "drills_done": []}
+        before = plan.unit_status or unit_status(p, 0)
+        # Evidencia con más peso para lo reciente: lo de clases anteriores cuenta la mitad en cada clase nueva, para
+        # que un mal día ya superado no bloquee la unidad para siempre.
+        d = RECENCY_DECAY
+        p.update(lessons=p["lessons"] + 1, correct=d * p["correct"] + correct, major=d * p["major"] + major,
+                 minor=d * p["minor"] + minor, last_correct=correct, last_major=major, last_minor=minor,
+                 drills_done=sorted(set(p.get("drills_done") or []) | drills_ok))
+        after = unit_status(p, mem.unit_words_used([v[0] for v in plan.unit["vocab"]]))
+        fields = {k: p[k] for k in ("lessons", "correct", "major", "minor", "last_correct", "last_major", "last_minor",
+                                     "drills_done")}
+        fields.update(score=after["score"], last_lesson_at=now)
+        if after["mastered"]:
+            fields.update(status="mastered", mastered_at=now)
+        mem.save_unit_progress(unit.key, **fields)
+        if plan.review_unit:
+            mem.save_unit_progress(plan.review_unit["key"], last_review_at=now)
+        return {"key": unit.key, "title": unit.title, "title_es": unit.title_es, "number": plan.unit_number,
+                "lesson": plan.unit_lesson, "score_before": before.get("score", 0), "score": after["score"],
+                "mastered": after["mastered"], "missing": after["missing"], "accuracy": after["last_accuracy"],
+                "correct": correct, "major": major, "minor": minor, "drills_ok": len(drills_ok),
+                "drills_tried": len(drills_tried), "words_used": after["words_used"], "words_total": len(plan.unit["vocab"])}
 
     def apply_summary_profile(self, strengths: list[str], weaknesses: list[str]) -> None:
         profile = self.memory.profile()

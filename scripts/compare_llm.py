@@ -27,11 +27,11 @@ from tutor.learning.planner import plan_next_lesson  # noqa: E402
 LEARNER = [
     (0.5, "warmup", "(The learner has joined the voice lesson and is ready.)"),
     (40, "warmup", "Hi! I'm fine, thanks. A bit tired, today I have a lot of work."),
-    (90, "main", "Yesterday I go to the office very early because we have a meeting with the client."),
-    (150, "main", "The meeting was about the new project. The client want more features but we don't have time."),
-    (220, "main", "Umm, I think we need more people, or maybe, uh, more time for finish it."),
-    (300, "main", "I have went to many meetings like this, it's normal in my job."),
-    (430, "practice", "Yes, the deadline is next month."),
+    (90, "produce", "Yesterday I go to the office very early because we have a meeting with the client."),
+    (150, "produce", "The meeting was about the new project. The client want more features but we don't have time."),
+    (220, "produce", "Umm, I think we need more people, or maybe, uh, more time for finish it."),
+    (300, "produce", "I have went to many meetings like this, it's normal in my job."),
+    (430, "review", "Yes, the deadline is next month."),
     (545, "wrapup", "Thank you, see you tomorrow!"),
 ]
 EVAL_CASES = [

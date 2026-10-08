@@ -40,10 +40,13 @@ def build_summary_input(metrics: dict, plan: LessonPlan, next_plan: LessonPlan, 
         "grammar_improvements": metrics["improvements"],
         "overused_words": metrics["fluency"]["overused_words"],
         "today_topic": plan.title,
-        "minutes": max(1, round(metrics.get("duration_s", 600) / 60)),
+        "minutes": max(1, round(metrics.get("duration_s", 900) / 60)),
         "turns": metrics["fluency"]["turns"],
         "next_lesson": {"topic": next_plan.title, "grammar": [g["name"] for g in next_plan.target_grammar],
-                        "review_words": [v["term"] for v in next_plan.review_vocab]},
+                        "review_words": [v["term"] for v in next_plan.review_vocab],
+                        "same_unit_as_today": (next_plan.unit or {}).get("key") == (plan.unit or {}).get("key"),
+                        "class_in_unit": next_plan.unit_lesson},
+        "unit_progress": metrics.get("unit"),
         "previous_strengths": snapshot.get("strengths", []),
         "previous_weaknesses": snapshot.get("weaknesses", []),
     }
@@ -69,12 +72,17 @@ def deterministic_summary(data: dict, plan: LessonPlan) -> SessionSummary:
     if fm["stuck_events"] == 0 and fm["long_pauses_per_min"] < 1:
         well_done.append("Few long pauses — good flow.")
     if not well_done:
-        well_done.append(f"You kept the conversation going for {data.get('minutes', 10)} minutes.")
+        well_done.append(f"You kept the class going for {data.get('minutes', 15)} minutes.")
     pool = data["new_vocabulary_introduced"] + plan.new_vocab
     expr = next((v for v in pool if " " in v["term"] and v.get("meaning_es")),
                 next((v for v in pool if v.get("meaning_es")), {"term": "Let me think about that…", "meaning_es": "Déjame pensarlo…"}))
     nl = data["next_lesson"]
-    tomorrow = f"We'll practise {nl['topic'].lower()}" + (f" and {nl['grammar'][0].lower()}" if nl["grammar"] else "") + "."
+    if nl.get("same_unit_as_today"):
+        tomorrow = f"We'll keep practising {nl['topic']} (class {nl['class_in_unit']}) until you master it."
+    elif plan.unit:
+        tomorrow = f"New unit: {nl['topic']}. 🎉"
+    else:
+        tomorrow = f"We'll practise {nl['topic'].lower()}" + (f" and {nl['grammar'][0].lower()}" if nl["grammar"] else "") + "."
     return SessionSummary(
         fluency_line=_TREND.get(data["fluency_trend_vs_previous_lessons"], ""),
         new_vocabulary=vocab,

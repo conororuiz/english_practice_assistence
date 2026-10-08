@@ -21,6 +21,7 @@ from .learning.db import Database
 from .learning.fluency import fluency_index
 from .learning.memory import UserMemory
 from .learning.planner import plan_next_lesson
+from .learning.route import ROUTE
 from .session.lesson import LessonSession
 from .session.models import Models, rss_mb
 
@@ -111,7 +112,20 @@ async def profile():
             "vocab": [{k: v[k] for k in ("term", "meaning_es", "status", "box", "prompted_uses", "spontaneous_uses")}
                       for v in vocab["items"][:60]],
             "next_plan": plan_next_lesson(mem).to_dict(),
+            "route": _route(mem),
             "last_summary": sessions[0]["summary"] if sessions else None}
+
+
+def _route(mem: UserMemory) -> list[dict]:
+    progress = mem.all_unit_progress()
+    current = mem.current_unit_key()
+    out = []
+    for i, u in enumerate(ROUTE):
+        p = progress.get(u.key) or {}
+        status = "mastered" if p.get("status") == "mastered" else "current" if u.key == current else "locked"
+        out.append({"number": i + 1, "key": u.key, "title": u.title, "title_es": u.title_es, "status": status,
+                    "score": round(p.get("score", 0)), "lessons": p.get("lessons", 0)})
+    return out
 
 
 class WsTransport:

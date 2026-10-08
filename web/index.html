@@ -17,6 +17,7 @@
 
   <main id="view-lesson">
     <div id="lesson-meta" class="meta">&nbsp;</div>
+    <section id="today" class="today hidden"></section>
 
     <div class="stage">
       <svg class="ring" viewBox="0 0 200 200" aria-hidden="true">
@@ -24,11 +25,15 @@
         <circle id="ring-fg" class="ring-fg" cx="100" cy="100" r="92" />
       </svg>
       <div id="orb" class="orb idle"><div class="core"></div></div>
-      <div id="clock" class="clock">10:00</div>
+      <div id="clock" class="clock">15:00</div>
     </div>
 
-    <div id="status" class="status">Pulsa para empezar tu lección de 10 minutos</div>
+    <div id="status" class="status">Pulsa para empezar tu clase de 15 minutos</div>
     <div id="phase" class="phase"></div>
+    <ol id="steps" class="steps hidden">
+      <li data-p="warmup">Saludo</li><li data-p="teach">Explicación</li><li data-p="drill">Ejercicios</li>
+      <li data-p="produce">Conversación</li><li data-p="review">Repaso</li><li data-p="wrapup">Cierre</li>
+    </ol>
 
     <div id="captions" class="captions">
       <div id="cap-tutor" class="cap tutor"></div>
@@ -36,7 +41,7 @@
     </div>
 
     <div class="controls">
-      <button id="start" class="primary">Empezar lección</button>
+      <button id="start" class="primary">Empezar clase</button>
       <button id="end" class="ghost hidden">Terminar</button>
       <button id="cc" class="ghost small" title="Subtítulos">CC</button>
     </div>

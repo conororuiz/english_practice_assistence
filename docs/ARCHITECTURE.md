@@ -63,17 +63,25 @@ progreso (qué repasar, cuándo, qué nivel) es código determinista y testeable
 
 ---
 
-## 3. Flujo de una lección de 10 minutos
+## 3. Flujo de una clase de 15 minutos (desde 2026-10-08)
 
-| Tiempo | Fase | Qué hace el tutor |
+> Antes (hasta la revisión del §13) la lección era una conversación libre de 10 minutos con la gramática "provocada".
+> Ahora es una **clase guiada** con un tema concreto de la ruta de aprendizaje (§14). Lo anterior se mantiene: detección
+> de turno, correcciones dosificadas, repetición espaciada, errores recurrentes, métricas, resumen.
+
+| Tiempo (máx.) | Paso | Qué hace el profesor |
 |---|---|---|
-| 0:00–1:00 | warm-up | Saludo y pregunta fácil que conduce al tema. Si el planner detectó una mejora, lo menciona ("You've improved a lot with past tense…"). |
-| 1:00–7:00 | main | Conversación real sobre el escenario (o role-play). Introduce el vocabulario nuevo, recicla el de repaso, provoca la gramática objetivo con preguntas. Correcciones breves sólo de errores importantes. |
-| 7:00–9:00 | practice | Transición natural; trabaja 1 ítem por turno de la lista generada **en vivo** con los errores *major* de esta lección y el vocabulario presentado que aún no ha usado. Si la conversación va muy bien a las 7:00, se alarga hasta 7:30. |
-| 9:00–10:00 | wrap-up | Cierre hablado (<60 palabras) + despedida. Se muestra el resumen escrito. |
+| 0:00–1:03 | warmup | Saludo; si hay una unidad dominada pendiente de repaso, una pregunta rápida de ella. Termina tras 1–2 intercambios. |
+| …–4:03 | teach | Presentación en 2–3 turnos que da el orquestador: tema y objetivo, regla en español (`explain_es`) y ejemplos; después las palabras nuevas de dos en dos (significado en español + ejemplo con la estructura + pregunta para usarlas). En clases 2+ de la unidad: repaso de la regla en una frase y el foco de hoy. |
+| …–8:15 | drill | Ejercicios guiados de la unidad, **uno por turno**, en orden (primero los que aún no resolvió bien). Si la respuesta falla la estructura, el profesor corrige y pide repetir una vez; luego pasa al siguiente. |
+| …–12:18 | produce | Conversación real (o role-play) con las preguntas abiertas de la unidad (`TALK`), una a una con repreguntas; corrige brevemente sólo la estructura del día y errores importantes. |
+| …–13:57 | review | Repaso: un ítem por turno (errores de hoy con la estructura, palabras sin usar); si vuelve a fallar, lo repite. |
+| …–15:00 | wrapup | Cierre: qué hemos aprendido, ejercicios bien, qué practicar; el resumen y el progreso de la unidad salen en pantalla. |
 
-Garantías de duración: la fase sale del reloj real en cada respuesta; a las 9:30 si el usuario no está hablando
-el tutor cierra él mismo; a 10:25 corte duro con una despedida local (sin LLM). Probado en `test_session_e2e.py`.
+Cada paso termina al cumplirse su objetivo (presentación dada, ejercicios agotados) o, como tarde, al tiempo de la
+tabla; nunca se vuelve atrás. Garantías de duración: a 14:15 si el usuario no está hablando el profesor cierra él
+mismo; a 15:25 corte duro con una despedida local. Las notas al modelo ya **no llevan el reloj**: con él a la vista,
+Gemma 4B tendía a despedirse antes de tiempo.
 
 ---
 
@@ -361,3 +369,55 @@ Validación: la lección grabada se repite de extremo a extremo con los turnos r
 (transcripciones correctas, el tutor reformula ante "I don't understand", fin de turno 1.4–2.7 s, tutor sonando
 1.2–1.8 s después). Banco sintético (`scripts/eval_turns.py`): 0 cortes, mediana 1.66 s. Coste conocido: large-v3-turbo
 "limpia" casi todas las muletillas, así que `fillers_per_100w` sale más bajo que con small.en.
+
+## 14. Clases guiadas con ruta de aprendizaje (2026-10-08)
+
+Petición: que la app se comporte como **un profesor que imparte clases** de 15 minutos, cada una de un tema concreto
+(p. ej. presente simple con ciertas palabras), siguiendo una ruta, sin subir de nivel hasta dominar el tema, y que se
+note desde el primer minuto. Se mantiene todo lo anterior (voz, turnos, correcciones dosificadas, SRS, errores
+recurrentes, métricas, resumen).
+
+**Ruta** (`learning/route.py`): 20 unidades en orden (presente simple → frecuencia → presente continuo → pasado →
+did/didn't → pasado continuo → going to → will → comparativos → present perfect ×3 → should/have to → peticiones →
+used to → condicionales ×2 → opiniones → verb + -ing/to → preguntas). Cada unidad: regla en español para decirla
+en voz alta, esquema, ejemplos, errores típicos de hispanohablantes, 8 palabras, 10 ejercicios guiados, 6 preguntas
+de conversación (`TALK`), contextos de role-play y un detector (regex) de intentos de la estructura.
+
+**Dominio** (tabla `unit_progress`): por clase se cuentan usos correctos de la estructura (respuestas a ejercicios
+sin error de la estructura + frases libres donde el detector la ve sin error) y errores de la estructura (`skill_key`
+de la unidad o coincidencia con sus errores típicos). La evidencia anterior se multiplica por 0,5 en cada clase nueva
+(un mal día no bloquea para siempre). Dominada si: ≥2 clases, ≥12 usos correctos (ponderados), ≥75 % de acierto
+ponderado, ≥80 % en la última clase y 6/8 palabras usadas. Si no, la siguiente clase es de la **misma unidad**, con
+las palabras que faltan, los ejercicios no resueltos primero, otro contexto y un foco explícito ("la última vez 60 %
+de acierto…"); desde la 4ª clase se pide explicarla de otra forma. Al dominarla: felicitación y unidad nueva; la
+dominada vuelve como pregunta de repaso a los ≥2 días.
+
+**Orquestación** (`session/lesson.py`, ver §3): el modelo pequeño no decide la estructura de la clase; el
+orquestador le da en cada turno el paso exacto (parte de la presentación, ejercicio N, pregunta de conversación,
+ítem de repaso) y comprueba con lo que realmente dijo si se avanzó (`drill_asked`, similitud de palabras clave).
+**Comprobación instantánea**: antes de cada respuesta se pasan las reglas locales (instantáneas) a lo que dijo el
+alumno; si hay un error seguro (p. ej. "my sister work", "he deal", "my boss no work", "I go always") la nota se lo dice
+al profesor ("no digas que está bien; corrige y pide repetir"). Sin esto Gemma 4B daba por buenas respuestas
+erróneas. Se añadieron reglas: 3ª persona sin -s (con excepciones tras auxiliares), negación "no + verbo", posición
+de adverbios de frecuencia.
+
+**Contexto**: 15 minutos no caben en 8k tokens; el historial se recorta de golpe (a ~7k caracteres, quitando notas
+viejas) sólo al pasar de ~16k, para no invalidar la caché de prefijo de Ollama en cada turno.
+
+**Validación** (`scripts/simulate_class.py`: Gemma de profesor + Gemma de alumno B1 con errores típicos, reloj simulado):
+
+| Problema visto en la simulación | Cambio |
+|---|---|
+| Daba por buena "My boss no work" ("Excellent, exactly right!") | Comprobación instantánea con reglas + nota explícita |
+| Corregía pero pasaba al siguiente ejercicio sin pedir repetir | Nota "no des el siguiente ejercicio todavía"; el orquestador detecta si repitió o avanzó |
+| Al acabar los ejercicios: "Would you like another session?" | El último ejercicio enlaza directamente con la conversación |
+| Hacia el minuto 10 se inventó un tema nuevo / "let's recap" / deberes / despedida | Preguntas de conversación por unidad, una a una; recordatorio en cada turno; sin reloj en las notas; regla "nunca cambies de tema ni termines" |
+| Repaso: "My friend work" → "Excellent!" | El repaso funciona como los ejercicios (corrige y repite) |
+| "(Pause)" leído en voz alta | El filtro de voz quita acotaciones |
+| La precisión acumulada no dejaba dominar la unidad tras un mal día | Evidencia ponderada (×0,5 por clase) |
+
+Resultado con un alumno simulado con errores en ~50 % de las frases: 3 clases de la unidad 1, cada una de 14:29–14:53
+min, con el orden saludo → explicación → 10 ejercicios → conversación → repaso → cierre; dominio 64 % → 79 % → 85 %;
+con la ponderación final la unidad queda dominada en la 3ª clase. Latencia media del profesor (respuesta completa,
+no primera frase) 3,7–4,4 s. Límite conocido: errores que no cubren las reglas dependen de Gemma, que a veces los
+pasa por alto; con la API de Claude (`TUTOR_LLM=anthropic`) la evaluación es más fiable.

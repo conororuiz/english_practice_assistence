@@ -126,23 +126,85 @@ def _fake_session(m: UserMemory, engine: LearningEngine, errors_pp: int, now: fl
     return plan, metrics
 
 
-def test_adaptive_path_targets_recurring_weakness():
+def test_route_stays_on_unit_until_mastered():
     m = mem()
     engine = LearningEngine(m)
     now = NOW
     plans = []
     for _ in range(4):
-        plan, _ = _fake_session(m, engine, errors_pp=3, now=now)
+        plan, metrics = _fake_session(m, engine, errors_pp=3, now=now)
         plans.append(plan)
         now += DAY
     nxt = plan_next_lesson(m, now)
-    # tras 4 lecciones con errores frecuentes de present perfect, la siguiente lo trabaja en contexto
-    assert nxt.target_grammar[0]["key"] == "present_perfect"
+    # sin dominar el presente simple, la ruta no avanza: misma unidad, clase 5, otro contexto cada vez
+    assert [p.unit["key"] for p in plans + [nxt]] == ["present_simple"] * 5
+    assert [p.unit_lesson for p in plans + [nxt]] == [1, 2, 3, 4, 5]
+    assert len({p.scenario_key for p in plans}) >= 2
+    assert not metrics["unit"]["mastered"] and metrics["unit"]["missing"]
+    assert nxt.target_grammar[0]["key"] == "present_simple"
+    # los errores recurrentes siguen llegando al profesor
     assert any(mk["original"].lower() == "i have went" for mk in nxt.recurring_mistakes)
-    # alterna contextos cotidiano / trabajo
-    assert {p.domain for p in plans} == {"everyday", "work"}
-    # el vocabulario presentado vuelve a repaso al día siguiente
-    assert nxt.review_vocab
+    # clase 1 presenta 4 palabras, clase 2 las otras 4; las presentadas sin usar se piden después
+    assert len(plans[0].new_vocab) == 4 and len(plans[1].new_vocab) == 4
+    assert {v["term"] for v in plans[0].new_vocab}.isdisjoint({v["term"] for v in plans[1].new_vocab})
+    assert not nxt.new_vocab and nxt.review_vocab
+    # tras varias clases sin dominarla, se pide explicarla de otra forma
+    assert any("different, simpler way" in n for n in nxt.adaptation_notes)
+
+
+def _unit_session(m, engine, now, good=True):
+    """Clase de la unidad actual: 8 ejercicios respondidos (bien o con error de la estructura) y las palabras usadas."""
+    plan = plan_next_lesson(m, now)
+    sid = m.db.create_session(1, plan.lesson_number, plan.to_dict())
+    vocab = LiveVocabLog()
+    for v in plan.new_vocab:
+        vocab.introduce(v["term"], v["meaning_es"])
+    turns = []
+    for i, drill in enumerate(plan.drills[:8]):
+        text = "My sister works in a hospital and she gets up early"
+        errors = [] if good else [{"original": "she work", "corrected": "she works", "category": "grammar",
+                                   "skill_key": "present_simple", "severity": "major", "explanation_es": "s"}]
+        ev = {"errors": errors, "target_vocab_used": [], "structures_used": [], "good_vocabulary": [], "complexity": 3,
+              "understood_question": True, "likely_asr_issue": False}
+        turns.append({"turn_id": None, "text": text, "drill": drill, "eval": ev,
+                      "audio": turn_metrics(text, 4.0, 5.0, 1.0, [0.5]).to_dict()})
+    for i, v in enumerate(plan.new_vocab + plan.review_vocab):
+        vocab.use(v["term"], i + 2, "")
+    metrics = engine.finalize(sid, plan, turns, vocab, 900, now=now)
+    m.db.finish_session(sid, metrics, {})
+    return plan, metrics
+
+
+def test_route_advances_only_when_mastered():
+    m = mem()
+    engine = LearningEngine(m)
+    p1, m1 = _unit_session(m, engine, NOW)
+    assert not m1["unit"]["mastered"]  # una sola clase nunca basta
+    assert 0 < m1["unit"]["score"] < 100
+    p2, m2 = _unit_session(m, engine, NOW + DAY)
+    assert p2.unit["key"] == "present_simple" and p2.unit_lesson == 2
+    assert m2["unit"]["mastered"] and m2["unit"]["score"] == 100
+    p3 = plan_next_lesson(m, NOW + 2 * DAY)
+    assert p3.unit["key"] == "frequency" and p3.unit_number == 2 and p3.unit_lesson == 1
+    assert p3.just_mastered == p1.unit["title"]
+    # una unidad dominada se repasa unos días después
+    p4 = plan_next_lesson(m, NOW + 5 * DAY)
+    assert p4.review_unit and p4.review_unit["key"] == "present_simple"
+
+
+def test_route_blocks_on_low_accuracy():
+    m = mem()
+    engine = LearningEngine(m)
+    _unit_session(m, engine, NOW, good=True)
+    _, metrics = _unit_session(m, engine, NOW + DAY, good=False)  # la última clase con errores de la estructura
+    assert not metrics["unit"]["mastered"]
+    assert any("errores" in x for x in metrics["unit"]["missing"])
+    nxt = plan_next_lesson(m, NOW + 2 * DAY)
+    assert nxt.unit["key"] == "present_simple"
+    assert any("Accuracy" in f for f in nxt.focus)
+    # los ejercicios que aún no resolvió bien van primero
+    assert nxt.drills[0] not in set(m.unit_progress("present_simple")["drills_done"]) or \
+        len(m.unit_progress("present_simple")["drills_done"]) == len(nxt.drills)
 
 
 def test_improvement_reduces_correction_focus():
@@ -230,3 +292,84 @@ def test_implausible_llm_errors_are_dropped():
     assert not plausible_error(err("we have went", "we have gone"), said)  # no lo dijo
     assert not plausible_error(err("on time", "on time"), said)
     assert plausible_error(err("The client want", "The client wants"), "The client want more features")
+
+
+# ---------------------------------------------------------------- clase guiada (ruta, ejercicios, reglas rápidas)
+def test_route_content_is_complete():
+    from tutor.learning.curriculum import GRAMMAR, SCENARIOS_BY_KEY
+    from tutor.learning.route import ROUTE, TALK, attempts_structure
+
+    assert len(ROUTE) == 20 and len({u.key for u in ROUTE}) == 20
+    for u in ROUTE:
+        assert u.skill in GRAMMAR and len(u.vocab) == 8 and len(u.drills) >= 8 and len(TALK[u.key]) >= 5
+        assert all(s in SCENARIOS_BY_KEY for s in u.scenarios)
+        assert attempts_structure(u, u.examples[0]), (u.key, u.examples[0])  # el detector reconoce sus ejemplos
+
+
+def test_drill_asked_tolerates_paraphrase():
+    from tutor.learning.route import drill_asked
+
+    drill = "What time do you usually get up on weekdays?"
+    assert drill_asked(drill, "Great! Now, what time do you usually get up on weekdays?")
+    assert drill_asked(drill, "Okay. So on weekdays, what time do you get up, usually?")
+    assert not drill_asked(drill, "How do you commute to work? Tell me in one full sentence.")
+
+
+def test_quick_rules_catch_present_simple_errors():
+    found = lambda t: [(e.original, e.corrected) for e in rule_based_evaluation(t).errors]  # noqa: E731
+    assert found("My sister work in a hospital") == [("my sister work", "my sister works")]
+    assert found("she always go to the gym") == [("she always go", "she always goes")]
+    assert found("he deal with problems") == [("he deal", "he deals")]
+    assert found("she study English") == [("she study", "she studies")]
+    assert found("my boss no work on Saturdays") == [("my boss no work", "my boss doesn't work")]
+    assert found("I go always to the office") == [("i go always", "i always go")]
+    assert found("My boss don't work on Saturdays") == [("my boss don't", "my boss doesn't")]
+    for ok in ("Does she work here?", "he can go", "she read a book yesterday", "I want him to help", "let it go"):
+        assert found(ok) == [], ok
+
+
+def test_teach_steps_and_unit_prompt():
+    from tutor.ai.prompts import teach_steps, tutor_system
+
+    m = mem()
+    plan = plan_next_lesson(m, NOW)
+    steps = teach_steps(plan)
+    assert len(steps) == 3  # regla + 2 bloques de 2 palabras
+    assert plan.unit["explain_es"] in steps[0]
+    assert all(v["term"] in " ".join(steps[1:]) for v in plan.new_vocab)
+    system = tutor_system(plan, m.snapshot())
+    assert "learning path unit 1 of 20" in system and "class 1 of this unit" in system
+
+
+def test_history_is_compacted_in_one_go():
+    from tutor.ai.conversation import HISTORY_KEEP_CHARS, compact_history
+
+    msgs = []
+    for i in range(60):
+        msgs += [{"role": "user", "content": f"answer {i} " + "x" * 120},
+                 {"role": "system", "content": "[note] " + "y" * 60},
+                 {"role": "assistant", "content": f"reply {i} " + "z" * 150}]
+    out = compact_history(msgs)
+    assert sum(len(m["content"]) for m in out) <= HISTORY_KEEP_CHARS
+    assert out[0]["role"] == "user" and out[-1]["content"].startswith("reply 59")
+    assert sum(m["role"] == "system" for m in out) <= 2  # las notas antiguas se quitan
+    assert compact_history(out) == out  # por debajo del límite no se toca (el prefijo se mantiene estable)
+
+
+def test_bad_class_does_not_block_unit_forever():
+    m = mem()
+    engine = LearningEngine(m)
+    _unit_session(m, engine, NOW, good=True)
+    _unit_session(m, engine, NOW + DAY, good=False)
+    _, m3 = _unit_session(m, engine, NOW + 2 * DAY, good=True)
+    assert not m3["unit"]["mastered"]  # todavía pesa el mal día
+    _, m4 = _unit_session(m, engine, NOW + 3 * DAY, good=True)
+    assert m4["unit"]["mastered"]  # dos buenas clases seguidas lo superan
+    assert m4["unit"]["score_before"] < 100 == m4["unit"]["score"]
+
+
+def test_stage_directions_are_not_spoken():
+    from tutor.ai.conversation import SpokenFilter
+
+    assert SpokenFilter([])("How was your morning? (Pause) Great!") == "How was your morning? Great!"
+    assert SpokenFilter([])("I commute (by train) every day.") == "I commute (by train) every day."

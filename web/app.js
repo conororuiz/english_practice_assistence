@@ -9,7 +9,8 @@ const STATUS = {
   tutor_speaking: "",
   summarizing: "Preparando tu resumen…",
 };
-const PHASES = { warmup: "Calentamiento", main: "Conversación", practice: "Práctica", wrapup: "Cierre" };
+const PHASES = { warmup: "Saludo", teach: "Explicación", drill: "Ejercicios", produce: "Conversación", review: "Repaso", wrapup: "Cierre" };
+const ORDER = Object.keys(PHASES);
 
 let ws, micCtx, micNode, micStream, player;
 let captionsOn = localStorage.getItem("cc") !== "0";
@@ -114,7 +115,11 @@ function onJson(m) {
       break;
     case "lesson": {
       const p = m.plan;
-      $("lesson-meta").textContent = `Lección ${p.lesson_number} · semana ${p.week} · ${p.title} · ${m.level}`;
+      $("lesson-meta").textContent = p.unit
+        ? `Clase ${p.lesson_number} · unidad ${p.unit.number} de ${p.unit.count} · ${m.level}`
+        : `Clase ${p.lesson_number} · ${p.title} · ${m.level}`;
+      if (p.unit) showToday(p.unit, p.new_vocab);
+      $("steps").classList.remove("hidden");
       break;
     }
     case "state":
@@ -126,7 +131,8 @@ function onJson(m) {
       const left = Math.max(0, m.total - m.elapsed);
       $("clock").textContent = `${String(Math.floor(left / 60)).padStart(2, "0")}:${String(Math.floor(left % 60)).padStart(2, "0")}`;
       $("ring-fg").style.strokeDashoffset = RING * (1 - Math.min(m.elapsed / m.total, 1));
-      $("phase").textContent = PHASES[m.phase] || "";
+      $("phase").textContent = "";
+      setStep(m.phase);
       break;
     }
     case "tutor_text":
@@ -163,8 +169,42 @@ function cleanup() {
   setOrb("idle");
   $("start").classList.remove("hidden");
   $("start").disabled = false;
-  $("start").textContent = "Nueva lección";
+  $("start").textContent = "Nueva clase";
+  $("steps").classList.add("hidden");
+  loadToday();
   $("end").classList.add("hidden");
+}
+
+function setStep(phase) {
+  const i = ORDER.indexOf(phase);
+  document.querySelectorAll("#steps li").forEach((li, j) => {
+    li.classList.toggle("done", j < i);
+    li.classList.toggle("now", j === i);
+  });
+}
+
+// Tarjeta del tema del día (antes y durante la clase): qué aprendemos hoy y cómo va la unidad.
+function showToday(u, newVocab) {
+  const el = $("today");
+  const words = (newVocab || []).map((v) => esc(v.term)).join(" · ");
+  el.innerHTML = `
+    <div class="unit">Unidad ${u.number} de ${u.count} · clase ${u.lesson} de la unidad</div>
+    <h2>${esc(u.title_es)}</h2>
+    <p class="goal">${esc(u.goal)}</p>
+    <div class="form">${esc(u.form)}</div>
+    ${words ? `<p class="goal" style="margin-top:8px">Palabras nuevas: ${words}</p>` : ""}
+    <div class="bar"><i style="width:${u.score || 0}%"></i></div>
+    <div class="unit">Dominio de la unidad: ${u.score || 0}%</div>`;
+  el.classList.remove("hidden");
+}
+
+async function loadToday() {
+  try {
+    const r = await fetch("/api/profile").then((x) => x.json());
+    const p = r.next_plan;
+    if (p.unit) showToday({ number: p.unit_number, count: p.unit_count, lesson: p.unit_lesson, title_es: p.unit.title_es,
+                            goal: p.unit.goal, form: p.unit.form, score: p.unit_status?.score || 0 }, p.new_vocab);
+  } catch {}
 }
 
 function setOrb(s) { $("orb").className = `orb ${s}`; }
@@ -181,12 +221,13 @@ function showSummary(s) {
   } else {
     el.innerHTML = `
       <h2>Today's progress</h2>
+      ${unitCard(s.unit, s.next_unit)}
       <h3>🔥 Fluency</h3><p>${esc(s.fluency_line)}</p>
       ${s.well_done?.length ? `<h3>👏 Well done</h3><ul>${s.well_done.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
       ${s.new_vocabulary?.length ? `<h3>📚 New vocabulary</h3><ul>${s.new_vocabulary.map((v) => `<li><b>${esc(v.term)}</b> — ${esc(v.meaning_es)}</li>`).join("")}</ul>` : ""}
       <h3>⚠️ Let's improve</h3><ul>${(s.improve || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
       <h3>💬 Useful expression</h3><p class="expr">"${esc(s.useful_expression)}" <span class="muted">— ${esc(s.useful_expression_es)}</span></p>
-      <h3>Tomorrow</h3><p>${esc(s.tomorrow)}</p>
+      <h3>Next class</h3><p>${esc(s.tomorrow)}</p>
       <div class="kpis">
         ${kpi(s.fluency?.speaking_wpm, "palabras/min")}
         ${kpi(s.fluency?.mean_turn_words, "palabras por respuesta")}
@@ -196,6 +237,18 @@ function showSummary(s) {
   }
   el.classList.remove("hidden");
 }
+function unitCard(u, next) {
+  if (!u) return "";
+  const head = u.mastered
+    ? `<b>🎉 ¡Unidad dominada!</b> ${esc(u.title_es)}<br><span class="muted">Siguiente clase: ${esc(next?.title)} (unidad ${next?.number})</span>`
+    : `<b>📈 ${esc(u.title_es)}</b> <span class="muted">— unidad ${u.number}, clase ${u.lesson}</span>`;
+  const missing = !u.mastered && u.missing?.length
+    ? `<p class="muted" style="margin:6px 0 0">Para dominarla te falta: ${u.missing.map(esc).join(" · ")}. Seguimos con ella en la próxima clase.</p>` : "";
+  return `<div class="unitcard ${u.mastered ? "mastered" : ""}">${head}
+    <div class="bar"><i style="width:${u.score}%"></i></div>
+    <span class="muted">Dominio ${u.score_before}% → <b>${u.score}%</b> · ejercicios bien ${u.drills_ok}/${u.drills_tried} ·
+      palabras usadas ${u.words_used}/${u.words_total}</span>${missing}</div>`;
+}
 const kpi = (v, label) => `<div class="kpi"><b>${esc(v ?? "–")}</b><span>${esc(label)}</span></div>`;
 
 // ---------------------------------------------------------------- progreso
@@ -203,25 +256,30 @@ async function showProgress() {
   const r = await fetch("/api/profile").then((x) => x.json());
   const s = r.snapshot;
   const pts = r.history.filter((h) => h.fluency_index != null);
-  const spark = pts.length > 1 ? sparkline(pts.map((p) => p.fluency_index)) : `<p class="muted">El gráfico aparece a partir de la 2ª lección.</p>`;
+  const spark = pts.length > 1 ? sparkline(pts.map((p) => p.fluency_index)) : `<p class="muted">El gráfico aparece a partir de la 2ª clase.</p>`;
   const plan = r.next_plan;
   $("progress").innerHTML = `
     <h2>Tu progreso</h2>
     <div class="kpis">
       ${kpi(s.level, "nivel estimado")}
-      ${kpi(s.lessons_completed, "lecciones")}
+      ${kpi(s.lessons_completed, "clases")}
       ${kpi(s.vocab.active ?? 0, "palabras activas")}
       ${kpi(s.vocab.mastered ?? 0, "dominadas")}
     </div>
-    <h3>Fluidez (índice por lección)</h3>${spark}
+    <h3>Fluidez (índice por clase)</h3>${spark}
     ${s.strengths.length ? `<h3>Fortalezas</h3><ul>${s.strengths.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
     ${s.weaknesses.length ? `<h3>A mejorar</h3><ul>${s.weaknesses.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
     ${Object.keys(s.skills).length ? `<h3>Gramática (dominio)</h3><div class="chips">${Object.entries(s.skills).map(([k, v]) => `<span class="chip">${esc(k.replace(/_/g, " "))} ${Math.round(v * 100)}%</span>`).join("")}</div>` : ""}
     ${s.recurring_mistakes.length ? `<h3>Errores recurrentes</h3><ul>${s.recurring_mistakes.map((m) => `<li>"${esc(m.original)}" → "${esc(m.corrected)}" <span class="muted">(${m.count}×)</span></li>`).join("")}</ul>` : ""}
     ${r.vocab.length ? `<h3>Vocabulario</h3><div class="chips">${r.vocab.map((v) => `<span class="chip ${v.status}" title="${esc(v.meaning_es)}">${esc(v.term)}</span>`).join("")}</div>` : ""}
-    <h3>Próxima lección</h3>
-    <p>${esc(plan.title)} <span class="muted">(${esc(plan.domain)} · semana ${plan.week}: ${esc(plan.weekly_goal)})</span></p>
-    ${plan.target_grammar.length ? `<p class="muted">Gramática: ${plan.target_grammar.map((g) => esc(g.name)).join(", ")}</p>` : ""}
+    <h3>Próxima clase</h3>
+    <p>${esc(plan.unit?.title_es || plan.title)} <span class="muted">(unidad ${plan.unit_number}, clase ${plan.unit_lesson} · ${esc(plan.weekly_goal)})</span></p>
+    <h3>Tu ruta</h3>
+    <ul class="route">${r.route.map((u) => `
+      <li class="${u.status}"><span class="n">${u.status === "mastered" ? "✅" : u.status === "current" ? "▶" : u.number}</span>
+        <span>${esc(u.title_es)}${u.status === "current" ? `<div class="bar small"><i style="width:${u.score}%"></i></div>` : ""}</span>
+        <span class="muted">${u.status === "mastered" ? "dominada" : u.status === "current" ? `${u.score}% · ${u.lessons} clase${u.lessons === 1 ? "" : "s"}` : ""}</span></li>`).join("")}
+    </ul>
     <p class="muted">Paciencia aprendida: pausa típica ${s.patience.pause_p50.toFixed(1)} s · pausas largas ${s.patience.pause_p90.toFixed(1)} s · multiplicador ×${s.patience.multiplier.toFixed(2)}</p>`;
 }
 
@@ -254,6 +312,7 @@ function applyCC() {
   $("cc").classList.toggle("on", captionsOn);
 }
 applyCC();
+loadToday();
 document.addEventListener("keydown", (e) => {
   if (e.key === "d" && e.altKey) $("debug").classList.toggle("hidden"); // Alt+D: panel de detección de turnos
 });

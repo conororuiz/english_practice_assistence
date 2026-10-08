@@ -1,5 +1,5 @@
 """Lección completa de extremo a extremo con los modelos locales reales (VAD, Whisper, Smart Turn, Kokoro)
-y el tutor simulado (sin red). La lección se acorta a 60 s para que el test sea rápido; la lógica de fases
+y el tutor simulado (sin red). La lección se acorta a 60 s para que el test sea rápido; la lógica de pasos
 es proporcional a la duración."""
 
 import asyncio
@@ -20,12 +20,12 @@ MODELS_OK = (settings.models_dir / settings.tts_model).exists()
 
 ANSWERS = [
     "I'm fine, thanks. I'm a bit tired today.",
-    "It was quite busy. Yesterday I go to a meeting with my manager.",
-    "We had a deadline for a new project.",
-    "The deadline is next Friday, so I have went to the office early.",
-    "No, never. It's my first big project.",
-    "I learned to organise my time better.",
-    "I usually go for a walk or watch a series.",
+    "My brother works in a hospital.",
+    "I commute by bus. It takes forty minutes.",
+    "My sister work in a bank and she gets up at six.",
+    "Yesterday I go to a meeting with my manager.",
+    "My manager deals with the clients every day.",
+    "I usually go for a walk on my day off.",
 ]
 
 
@@ -108,12 +108,13 @@ async def test_full_lesson(models, tmp_path: Path):
     finals = [m for m in client.json if m["type"] == "user_final"]
     summary = next(m for m in client.json if m["type"] == "summary")["summary"]
 
-    assert {"warmup", "main", "practice", "wrapup"} <= phases
+    assert {"warmup", "teach", "drill", "produce", "wrapup"} <= phases
     assert len(finals) >= 3, finals
     assert client.audio_bytes > 24000 * 2 * 5  # el tutor habló (>5 s de audio)
     assert "aborted" not in summary
     assert summary["duration_s"] <= 60 + 25  # nunca se alarga más allá del margen duro
-    assert summary["next_lesson"] != session.plan.title  # la siguiente lección es otra (planificada tras completar)
+    # la siguiente clase se planifica tras completar esta: misma unidad (una clase nunca basta), clase 2
+    assert summary["next_unit"]["lesson"] == 2
     row = db.one("SELECT status, metrics_json FROM sessions")
     assert row["status"] == "completed"
     metrics = json.loads(row["metrics_json"])
@@ -124,7 +125,12 @@ async def test_full_lesson(models, tmp_path: Path):
     # La paciencia aprendida se persiste
     assert json.loads(db.one("SELECT patience_json FROM users")["patience_json"])["endpoints"] >= 3
     # El tutor presentó vocabulario con la etiqueta silenciosa y el usuario lo usó → seguimiento SRS
-    assert db.one("SELECT * FROM vocab WHERE term='deadline'") is not None
+    assert db.one("SELECT * FROM vocab WHERE term='to commute'") is not None
+    # Clase de la ruta: ejercicios guiados respondidos y progreso de la unidad guardado
+    assert any(t.get("drill") for t in session.user_turns)
+    assert metrics["unit"]["key"] == "present_simple" and metrics["unit"]["drills_tried"] >= 1
+    assert db.one("SELECT lessons FROM unit_progress WHERE unit_key='present_simple'")["lessons"] == 1
+    assert summary["unit"]["title"] and summary["next_unit"]["title"]
     assert "turn_eval" in kinds
 
 
