@@ -23,32 +23,143 @@ Diseño completo, decisiones y resultados medidos: **[docs/ARCHITECTURE.md](docs
 
 ## Requisitos
 
-- macOS / Linux con Python 3.12 y [uv](https://docs.astral.sh/uv/) (Windows debería funcionar; no probado).
+- **Windows 10/11, Linux (x86-64 o ARM64) o macOS**. Python 3.12 lo instala `uv` automáticamente.
 - ~4,5 GB de disco para modelos. RAM medida del sistema completo durante una lección (backend + Gemma + Chrome):
-  5,8–7,3 GB de pico. Para dejar más margen: `TUTOR_OLLAMA_MODEL=qwen3.5:4b` (~1,1 GB menos, conversación algo peor).
-- Ollama sólo se ejecuta mientras la app está abierta: la app lo arranca (con atención flash y caché en 8 bits para
-  gastar menos memoria) y, al cerrarla con Ctrl+C, descarga el modelo y lo detiene. Si ya tenías Ollama en marcha
-  por tu cuenta, la app no lo para; sólo libera el modelo de la memoria.
+  5,8–7,3 GB de pico (recomendado **8 GB o más**). Para dejar más margen: `TUTOR_OLLAMA_MODEL=qwen3.5:4b`
+  (~1,1 GB menos, conversación algo peor). No hace falta tarjeta gráfica; si Ollama encuentra una, la usa.
 - **Gratis y 100 % local** por defecto: el tutor es un modelo de lenguaje local (Gemma 3 4B) servido con
   [Ollama](https://ollama.com). Opcional: la API de Claude (de pago, aparte de la suscripción de Claude) para una
   conversación y una evaluación de más calidad. Sin ninguno de los dos arranca en **modo demo** (tutor guionizado).
 - Chrome, Edge o Safari recientes. **Recomendado: auriculares** (evita que el micrófono capte al tutor).
+- Reconocimiento de voz: en Mac con Apple Silicon usa Whisper large-v3-turbo (MLX); en Windows, Linux y Mac Intel
+  usa Whisper small.en en CPU (algo menos preciso con acento español).
 
-## Puesta en marcha
+## Instalación paso a paso
 
-```bash
-cd ~/english-voice-tutor
-brew install ollama                  # servidor de modelos local (una vez; la app lo arranca y lo para sola)
-ollama pull gemma3:4b                # el tutor (3,3 GB, una vez)
-uv sync                              # dependencias
-./scripts/download_models.sh         # modelos de voz (~830 MB; +464 MB en Apple Silicon)
-uv run python -m tutor.main          # → http://127.0.0.1:8765
+Los pasos son los mismos en los tres sistemas: instalar **Git**, **uv** y **Ollama**, descargar el código, el
+modelo del tutor y los modelos de voz, y arrancar. Todo se hace una sola vez salvo el último paso.
+
+### Windows 10/11
+
+Abre **PowerShell** (menú Inicio → escribe «PowerShell») y ejecuta, uno por uno:
+
+```powershell
+# 1. Herramientas (si winget no existe, instala «App Installer» desde Microsoft Store)
+winget install --id Git.Git -e
+winget install --id astral-sh.uv -e
+winget install --id Ollama.Ollama -e
 ```
 
-Abre http://127.0.0.1:8765, pulsa **Empezar clase** y habla. `CC` muestra/oculta los subtítulos;
-**Alt+D** muestra el panel de detección de turno (completitud, silencio requerido, multiplicador de paciencia).
-La pestaña **Progreso** muestra tu ruta (unidades dominadas, la actual con su % de dominio), nivel, errores
-recurrentes, vocabulario, gramática y la próxima clase.
+**Cierra PowerShell y ábrelo de nuevo** para que reconozca los comandos nuevos. Después:
+
+```powershell
+# 2. Código
+cd $HOME
+git clone https://github.com/conororuiz/english_practice_assistence.git english-voice-tutor
+cd english-voice-tutor
+
+# 3. Modelo del tutor (3,3 GB)
+ollama pull gemma3:4b
+
+# 4. Dependencias de Python y modelos de voz (~830 MB)
+uv sync
+uv run python scripts/download_models.py
+
+# 5. Arrancar
+uv run python -m tutor.main
+```
+
+Notas de Windows:
+- Ollama se instala como aplicación con icono en la bandeja y queda siempre en marcha; la app lo usa tal cual.
+- La primera vez Windows puede preguntar por el **firewall**: basta con permitir el acceso en redes privadas
+  (el servidor sólo escucha en `127.0.0.1`, tu propio equipo).
+- Sin winget: descarga los instaladores de [git-scm.com](https://git-scm.com/download/win),
+  [ollama.com/download](https://ollama.com/download) y, para uv, ejecuta en PowerShell
+  `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.
+
+### Linux (Ubuntu/Debian; en otras distros cambia `apt` por tu gestor)
+
+```bash
+# 1. Herramientas
+sudo apt update && sudo apt install -y git curl
+curl -LsSf https://astral.sh/uv/install.sh | sh         # uv
+curl -fsSL https://ollama.com/install.sh | sh            # Ollama
+source ~/.bashrc                                         # o abre una terminal nueva para tener `uv` en el PATH
+
+# 2. Código
+cd ~
+git clone https://github.com/conororuiz/english_practice_assistence.git english-voice-tutor
+cd english-voice-tutor
+
+# 3. Modelo del tutor (3,3 GB)
+ollama pull gemma3:4b
+
+# 4. Dependencias de Python y modelos de voz (~830 MB)
+uv sync
+uv run python scripts/download_models.py
+
+# 5. Arrancar
+uv run python -m tutor.main
+```
+
+Notas de Linux:
+- El instalador de Ollama lo deja como servicio de systemd siempre activo. Si prefieres que sólo funcione mientras
+  usas la app: `sudo systemctl disable --now ollama` (la app lo arrancará y parará sola).
+- Si `ollama pull` dice que no puede conectar, arranca el servicio: `sudo systemctl start ollama`.
+
+### macOS
+
+```bash
+# 1. Herramientas (con Homebrew: https://brew.sh)
+brew install git uv ollama
+
+# 2. Código
+cd ~
+git clone https://github.com/conororuiz/english_practice_assistence.git english-voice-tutor
+cd english-voice-tutor
+
+# 3. Modelo del tutor (3,3 GB). Ollama tiene que estar en marcha para descargar:
+ollama serve &                    # o abre la app Ollama
+ollama pull gemma3:4b
+
+# 4. Dependencias de Python y modelos de voz (~830 MB; +464 MB en Apple Silicon)
+uv sync
+uv run python scripts/download_models.py
+
+# 5. Arrancar
+uv run python -m tutor.main
+```
+
+En macOS, si Ollama no estaba en marcha, la app lo arranca (con atención flash y caché en 8 bits para gastar menos
+memoria) y, al cerrarla con Ctrl+C, descarga el modelo y lo detiene. Si ya lo tenías en marcha, no lo para; sólo
+libera el modelo de la memoria. (Lo mismo vale para Windows y Linux si Ollama no está ya funcionando.)
+
+### Usar la app
+
+Con la app arrancada, abre **http://127.0.0.1:8765** en Chrome o Edge, pulsa **Empezar clase**, acepta el permiso
+del micrófono y habla. Para cerrarla, `Ctrl+C` en la terminal. Las siguientes veces sólo hace falta:
+
+```bash
+cd ~/english-voice-tutor          # Windows: cd $HOME\english-voice-tutor
+uv run python -m tutor.main
+```
+
+`CC` muestra/oculta los subtítulos; **Alt+D** muestra el panel de detección de turno (completitud, silencio
+requerido, multiplicador de paciencia). La pestaña **Progreso** muestra tu ruta (unidades dominadas, la actual con
+su % de dominio), nivel, errores recurrentes, vocabulario, gramática y la próxima clase.
+
+Para actualizar a la última versión: `git pull`, `uv sync` y `uv run python scripts/download_models.py`.
+
+### Problemas frecuentes
+
+| Síntoma | Solución |
+|---|---|
+| `uv`, `ollama` o `git` «no se reconoce como comando» | Cierra y vuelve a abrir la terminal tras instalarlos |
+| La app arranca en **modo demo** | Ollama no responde o falta el modelo: `ollama list` debe mostrar `gemma3:4b` |
+| `Faltan modelos: …` | Ejecuta `uv run python scripts/download_models.py` (se puede repetir; reanuda lo que falte) |
+| El tutor no te oye | Permiso de micrófono del navegador (icono del candado) y del sistema; usa `http://127.0.0.1:8765`, no la IP |
+| El tutor se interrumpe a sí mismo | Usa auriculares |
+| Va lento o se queda sin memoria | Cierra otras apps o usa `TUTOR_OLLAMA_MODEL=qwen3.5:4b` (ver Configuración) |
 
 ## Pruebas
 
@@ -76,11 +187,14 @@ tutor/
   session/    lesson.py (orquestador de la clase: pasos, ejercicios, repaso) · models.py (carga de modelos)
   main.py     servidor FastAPI + WebSocket
 web/          interfaz mínima (index.html, app.js, mic-worklet.js, style.css)
-scripts/      descarga de modelos, banco de turnos, medición de RAM, prueba WebSocket
+scripts/      descarga de modelos (download_models.py), banco de turnos, medición de RAM, prueba WebSocket
 docs/         ARCHITECTURE.md
 ```
 
 ## Configuración (`.env`)
+
+Opcional. Copia `.env.example` a `.env` (Windows: `copy .env.example .env`; Linux/macOS: `cp .env.example .env`)
+y descomenta lo que quieras cambiar.
 
 | Variable | Por defecto | |
 |---|---|---|

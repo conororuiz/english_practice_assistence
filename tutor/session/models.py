@@ -41,7 +41,7 @@ class Models:
         missing = [p for p in (d / s.vad_model, d / s.smart_turn_model, d / s.tts_model, d / "voices-v1.0.bin", d / s.stt_model)
                    if not p.exists()]
         if missing:
-            raise FileNotFoundError(f"Faltan modelos: {missing}. Ejecuta scripts/download_models.sh")
+            raise FileNotFoundError(f"Faltan modelos: {missing}. Ejecuta: uv run python scripts/download_models.py")
         t0, base = time.time(), rss_mb()
         vad = SileroVAD.load_session(str(d / s.vad_model))
         smart = SmartTurn(str(d / s.smart_turn_model))
