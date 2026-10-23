@@ -132,6 +132,11 @@ async def test_full_lesson(models, tmp_path: Path):
     assert db.one("SELECT lessons FROM unit_progress WHERE unit_key='present_simple'")["lessons"] == 1
     assert summary["unit"]["title"] and summary["next_unit"]["title"]
     assert "turn_eval" in kinds
+    # análisis de cada respuesta en pantalla, también en el resumen final
+    fbs = [m for m in client.json if m["type"] == "turn_feedback"]
+    assert fbs and all(m["feedback"]["analysis_es"] for m in fbs)
+    assert any(s["why_es"] and s["how_es"] for m in fbs for s in m["feedback"]["suggestions"]), fbs
+    assert len(summary["feedback"]) == len(fbs)
 
 
 async def test_barge_in_stops_tutor(models, tmp_path: Path):

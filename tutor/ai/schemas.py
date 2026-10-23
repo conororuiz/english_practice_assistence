@@ -50,6 +50,28 @@ class TurnEvaluation(BaseModel):
     likely_asr_issue: bool = Field(default=False, description="True if the transcript looks garbled by speech recognition rather than a learner error")
 
 
+class Suggestion(BaseModel):
+    kind: Literal["correction", "more_natural", "richer_answer"] = Field(
+        description="correction = fixes one of the verified errors; more_natural = correct but a native speaker would "
+                    "say it differently; richer_answer = a fuller model answer to the teacher's question")
+    you_said: str = Field(default="", description="The learner's exact fragment (empty for richer_answer)")
+    better: str = Field(description="What to say instead, in English")
+    why_es: str = Field(description="In Spanish: WHY this is better (the reason or rule), 1-2 short sentences")
+    how_es: str = Field(description="In Spanish: HOW to use it — the pattern and when to use it, 1-2 short sentences")
+    example: str = Field(description="A NEW English example sentence using the same pattern (different from 'better')")
+
+
+class TurnFeedback(BaseModel):
+    """Análisis de una respuesta del alumno para la pantalla: qué comunicó y cómo decirlo mejor, explicado."""
+    analysis_es: str = Field(description="In Spanish, 1-2 sentences: did they answer the question, what they "
+                                         "communicated well, what to improve")
+    suggestions: list[Suggestion] = Field(default_factory=list, description="Corrections and more natural phrasing")
+    model_answer: str = Field(description="A fuller, natural model answer to the teacher's question (2-3 sentences) "
+                                          "that keeps the learner's idea and uses today's structure or words")
+    model_answer_why_es: str = Field(description="In Spanish: why this answer works better than theirs")
+    model_answer_how_es: str = Field(description="In Spanish: how to build answers like this (the pattern to reuse)")
+
+
 class SummaryVocab(BaseModel):
     term: str
     meaning_es: str

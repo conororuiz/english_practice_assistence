@@ -69,6 +69,8 @@ class Player {
 async function start() {
   $("start").disabled = true;
   $("summary").classList.add("hidden");
+  $("feedback").classList.add("hidden");
+  $("feedback-list").innerHTML = "";
   setStatus("Conectando…");
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
@@ -152,7 +154,14 @@ function onJson(m) {
     case "turn_debug":
       $("debug").textContent = `smart-turn=${m.smart_turn}  texto=${m.text_p?.toFixed?.(2) ?? "-"}  completitud=${m.completeness}  silencio requerido=${m.required_silence}s  multiplicador=${m.multiplier}`;
       break;
+    case "turn_feedback":
+      addFeedback(m);
+      break;
     case "summary":
+      if (m.summary.feedback?.length) {
+        $("feedback-list").innerHTML = "";
+        m.summary.feedback.forEach(addFeedback);
+      }
       showSummary(m.summary);
       ws.close();
       break;
@@ -211,6 +220,27 @@ function setOrb(s) { $("orb").className = `orb ${s}`; }
 function setStatus(t) { $("status").textContent = t; }
 function banner(t) { $("banner").textContent = t; $("banner").classList.remove("hidden"); }
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+const KIND = { correction: "Corrección", more_natural: "Más natural", richer_answer: "Respuesta más completa" };
+
+function addFeedback(m) {
+  const fb = m.feedback;
+  const card = document.createElement("article");
+  card.className = "fb";
+  card.innerHTML = `
+    <p class="said">“${esc(m.text)}”</p>
+    <p class="analysis">${esc(fb.analysis_es)}</p>
+    ${fb.suggestions.map((s) => `
+      <div class="sug ${s.kind}">
+        <div class="kind">${KIND[s.kind] || ""}</div>
+        <p class="better">${s.you_said ? `<s>${esc(s.you_said)}</s> → ` : ""}<b>${esc(s.better)}</b></p>
+        ${s.why_es ? `<p><span class="lbl">Por qué:</span> ${esc(s.why_es)}</p>` : ""}
+        ${s.how_es ? `<p><span class="lbl">Cómo se usa:</span> ${esc(s.how_es)}</p>` : ""}
+        ${s.example ? `<p class="ex"><span class="lbl">Otro ejemplo:</span> ${esc(s.example)}</p>` : ""}
+      </div>`).join("")}`;
+  $("feedback-list").prepend(card);
+  $("feedback").classList.remove("hidden");
+}
 
 function showSummary(s) {
   setStatus("¡Lección terminada!");

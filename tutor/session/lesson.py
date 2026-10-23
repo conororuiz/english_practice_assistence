@@ -32,6 +32,7 @@ import numpy as np
 
 from ..ai.conversation import ConversationAgent, SpokenFilter, visible_text
 from ..ai.prompts import drill_note, produce_reminder, teach_steps
+from ..ai.coach import Coach, worth_coaching
 from ..ai.evaluator import Evaluator, asks_for_help, rule_based_evaluation, term_used
 from ..ai.llm import LLM
 from ..ai.summarizer import Summarizer, build_summary_input
@@ -98,6 +99,7 @@ class LessonSession:
         self.snapshot = self.memory.snapshot()
         self.agent = ConversationAgent(llm, self.plan, self.snapshot, settings.lesson_seconds)
         self.evaluator = Evaluator(llm if use_llm_for_analysis else None, errors_only=local_llm)
+        self.coach = Coach(llm if use_llm_for_analysis else None)
         # Con un modelo local pequeño el resumen es determinista: sólo hechos medidos, nada inventado.
         self.summarizer = Summarizer(llm if use_llm_for_analysis and not local_llm else None, settings.summary_effort)
         self.engine = LearningEngine(self.memory)
@@ -129,6 +131,7 @@ class LessonSession:
         self.turn_idx = 0
         self.user_turns: list[dict] = []
         self.eval_tasks: list[asyncio.Task] = []
+        self.coach_tasks: list[asyncio.Task] = []
         self.corrections_given: list[dict] = []
         self.last_fix_turn = -10
         self.next_notes: list[str] = []
@@ -656,6 +659,15 @@ class LessonSession:
         await self.t.send_json({"type": "turn_eval", "idx": ut["idx"],
                                 "errors": [{"original": e["original"], "corrected": e["corrected"], "severity": e["severity"]}
                                            for e in d["errors"]]})
+        if worth_coaching(ut["text"]) and d["understood_question"] and not d["likely_asr_issue"]:
+            self.coach_tasks.append(_spawn(self._coach(ut, tutor_text)))
+
+    async def _coach(self, ut: dict, tutor_text: str) -> None:
+        """Análisis de la respuesta para la pantalla (no se dice en voz alta: no interrumpe la clase)."""
+        fb = (await self.coach.feedback(tutor_text, ut["text"], ut["eval"]["errors"], self.plan)).model_dump()
+        ut["feedback"] = fb
+        self.db.set_turn_eval(ut["turn_id"], {**ut["eval"], "feedback": fb})
+        await self.t.send_json({"type": "turn_feedback", "idx": ut["idx"], "text": ut["text"], "feedback": fb})
 
     def _detect_vocab(self, spoken: str, tagged: set[str]) -> None:
         """Vocabulario objetivo que el tutor ha dicho (aunque el modelo no haya usado las etiquetas):
@@ -808,10 +820,16 @@ class LessonSession:
                 if "eval" not in ut:
                     ut["eval"] = rule_based_evaluation(ut["text"], self.plan).model_dump()
                     self.db.set_turn_eval(ut["turn_id"], ut["eval"])
+        if self.coach_tasks:  # el último análisis suele seguir en marcha; no se espera más de 15 s
+            _, pending = await asyncio.wait(self.coach_tasks, timeout=15)
+            for task in pending:
+                task.cancel()
+        feedback = [{"idx": ut["idx"], "text": ut["text"], "feedback": ut["feedback"]}
+                    for ut in self.user_turns if ut.get("feedback")]
         self.memory.save_patience(self.detector.profile)
         if len(self.user_turns) < 2:
             self.db.finish_session(self.session_id, {}, {}, status="aborted")
-            self.summary = {"aborted": True, "reason": reason}
+            self.summary = {"aborted": True, "reason": reason, "feedback": feedback}
             await self.t.send_json({"type": "summary", "summary": self.summary})
             return
         lesson_seconds = min(self.elapsed(), self.s.lesson_seconds) or self.s.lesson_seconds
@@ -830,7 +848,8 @@ class LessonSession:
                         "fluency": metrics["fluency"], "duration_s": metrics["duration_s"], "reason": reason,
                         "next_lesson": next_plan.title, "unit": metrics.get("unit"),
                         "next_unit": {"title": next_plan.title, "number": next_plan.unit_number,
-                                      "lesson": next_plan.unit_lesson}}
+                                      "lesson": next_plan.unit_lesson},
+                        "feedback": feedback}
         self.db.finish_session(self.session_id, metrics, self.summary)
         await self.t.send_json({"type": "summary", "summary": self.summary})
 

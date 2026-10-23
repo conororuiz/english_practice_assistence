@@ -98,3 +98,18 @@ svg.spark circle { fill: var(--accent); }
 .route .n { color: var(--muted); font-variant-numeric: tabular-nums; }
 .unitcard { background: var(--bg); border-radius: 12px; padding: 12px 14px; margin: 8px 0; }
 .unitcard.mastered { outline: 1px solid var(--user); }
+
+.feedback { text-align: left; margin: 24px auto 0; max-width: 560px; }
+.feedback h2 { font-size: 16px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+.fb { background: var(--panel); border-radius: 14px; padding: 12px 16px; margin-bottom: 10px; font-size: 14px; }
+.fb p { margin: 4px 0; }
+.fb .said { color: var(--muted); font-style: italic; }
+.fb .analysis { font-size: 15px; }
+.sug { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; margin-top: 10px; }
+.sug.correction { border-color: var(--warn); }
+.sug.richer_answer { border-color: var(--user); }
+.sug .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.sug .better { font-size: 15px; }
+.sug s { color: var(--danger); }
+.sug .lbl { color: var(--muted); }
+.sug .ex { font-style: italic; }

@@ -278,6 +278,60 @@ def evaluator_prompt(tutor_text: str, learner_text: str, plan: LessonPlan, known
     }, ensure_ascii=False)
 
 
+COACH_SYSTEM = """You are an English teacher writing on-screen feedback for a Spanish-speaking adult learner (about B1) \
+about ONE answer they just gave by voice in a class. The learner's words come from speech recognition: ignore \
+punctuation, capitalisation and filler words.
+
+Write:
+- analysis_es: in Spanish, at most 30 words. Say if they answered the teacher's question, what they communicated \
+well, and the most useful thing to improve. Be specific and encouraging, never generic. If there are verified \
+errors, don't call the answer correct.
+- suggestions: 0 to 3, the most useful first. Each one must TEACH, not only correct:
+  - better: what to say, in natural English.
+  - why_es: in Spanish, WHY (the rule or the reason a native speaker says it that way).
+  - how_es: in Spanish, HOW to use it: the pattern (e.g. "she + verbo con -s") and WHEN to use it.
+  - example: a NEW English sentence with exactly the same grammar pattern and tense, about a different situation.
+  - why_es and how_es are REQUIRED in every suggestion and ALWAYS written in Spanish.
+- suggestions of kind "correction": ONE per verified error given to you, with you_said = its exact fragment and better = its \
+correction. Never report other mistakes as corrections.
+- suggestions of kind "more_natural": only when what they said is correct but clearly unnatural; you_said = their exact fragment.
+- model_answer: a fuller, natural answer to the teacher's question (2-3 sentences) that keeps the learner's idea and \
+the tense the question needs, using today's structure or words when they fit; model_answer_why_es and model_answer_how_es explain, in Spanish, why it works better \
+and how to build answers like it.
+- Contractions are correct. Present simple for routines and jobs is correct. If unsure, it's not an error.
+- Keep everything short: the learner reads it during the class.
+- Explain grammar correctly and simply. If you are not sure of a rule, explain the meaning instead of naming a rule.
+
+Example. Teacher: "What does your brother do?" Learner: "My brother work in a hospital, he is nurse." Verified errors: \
+"My brother work" → "My brother works"; "he is nurse" → "he is a nurse". A good answer:
+{"analysis_es": "Has respondido bien: se entiende qué hace tu hermano. Fíjate en la -s del verbo con he/she y en el \
+artículo delante de las profesiones.",
+ "suggestions": [
+  {"kind": "correction", "you_said": "My brother work", "better": "My brother works",
+   "why_es": "My brother equivale a he, y con he/she/it el verbo en presente lleva -s.",
+   "how_es": "Rutinas y trabajos de otra persona: he/she + verbo con -s (works, lives, goes).",
+   "example": "My mother lives in Bogotá."},
+  {"kind": "correction", "you_said": "he is nurse", "better": "he is a nurse",
+   "why_es": "En inglés las profesiones llevan a/an delante, aunque en español no se diga.",
+   "how_es": "be + a/an + profesión: I'm an engineer, she's a teacher.",
+   "example": "My sister is an architect."}],
+ "model_answer": "My brother works in a hospital. He's a nurse, so he usually works at night.",
+ "model_answer_why_es": "Añade un detalle sobre su rutina y une las ideas con so, así suena más natural.",
+ "model_answer_how_es": "Di qué hace y añade un detalle con so o because: He's a ..., so he ..."}"""
+
+
+def coach_prompt(tutor_text: str, learner_text: str, errors: list[dict], plan: LessonPlan) -> str:
+    return json.dumps({
+        "teacher_asked": tutor_text,
+        "learner_answered": learner_text,
+        "verified_errors": [{"you_said": e["original"], "correct": e["corrected"], "reason_es": e["explanation_es"]}
+                            for e in errors],
+        "todays_topic": (plan.unit or {}).get("title", plan.title),
+        "todays_structure": (plan.unit or {}).get("form", ""),
+        "todays_words": plan.all_target_terms,
+    }, ensure_ascii=False)
+
+
 SUMMARY_SYSTEM = """You write the short end-of-lesson feedback card for a Spanish-speaking English learner (around B1) \
 who just finished a 15-minute voice class with their teacher. Style: friendly, concrete, not academic. Mostly English with \
 short Spanish clarifications where helpful (like a good bilingual tutor). Use only the facts provided; never invent errors \

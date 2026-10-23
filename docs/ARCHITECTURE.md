@@ -421,3 +421,19 @@ min, con el orden saludo → explicación → 10 ejercicios → conversación �
 con la ponderación final la unidad queda dominada en la 3ª clase. Latencia media del profesor (respuesta completa,
 no primera frase) 3,7–4,4 s. Límite conocido: errores que no cubren las reglas dependen de Gemma, que a veces los
 pasa por alto; con la API de Claude (`TUTOR_LLM=anthropic`) la evaluación es más fiable.
+
+## 15. Análisis de cada respuesta en pantalla (2026-10-23)
+
+Tras evaluar cada turno, `tutor/ai/coach.py` escribe un análisis para la pantalla (no se dice en voz alta, para no
+cortar la clase): una valoración corta y hasta 3 sugerencias, cada una con **qué decir**, **por qué**, **cómo se usa**
+y **otro ejemplo**, más una **respuesta más completa** a la pregunta del profesor. Se envía como `turn_feedback`, se
+guarda en `turns.eval_json["feedback"]` y vuelve en el resumen (`summary.feedback`).
+
+- Las correcciones salen sólo de los errores ya verificados por el evaluador: el modelo las explica pero no puede
+  añadir otras. Lo que no se puede comprobar o no está en español se descarta.
+- Si el error es de una estructura de la ruta (la corrección introduce la estructura de una unidad), la regla y el
+  ejemplo salen de la unidad, revisados a mano, porque un modelo de 4B explica mal la gramática.
+- Va en segundo plano detrás de la evaluación (con Ollama, ~8-18 s por turno; la conversación tiene prioridad), así
+  que el análisis suele llegar durante la respuesta siguiente. Al terminar se esperan como mucho 15 s.
+- Comparativa con 5 respuestas reales: qwen3.5:4b explica bastante mejor que gemma3:4b (gemma inventa reglas,
+  "have + participio" para "had a party"), pero es ~1,5× más lento.
