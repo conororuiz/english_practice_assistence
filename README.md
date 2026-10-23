@@ -24,10 +24,9 @@ Diseño completo, decisiones y resultados medidos: **[docs/ARCHITECTURE.md](docs
 ## Requisitos
 
 - **Windows 10/11, Linux (x86-64 o ARM64) o macOS**. Python 3.12 lo instala `uv` automáticamente.
-- ~4,5 GB de disco para modelos. RAM medida del sistema completo durante una lección (backend + Gemma + Chrome):
-  5,8–7,3 GB de pico (recomendado **8 GB o más**). Para dejar más margen: `TUTOR_OLLAMA_MODEL=qwen3.5:4b`
-  (~1,1 GB menos, conversación algo peor). No hace falta tarjeta gráfica; si Ollama encuentra una, la usa.
-- **Gratis y 100 % local** por defecto: el tutor es un modelo de lenguaje local (Gemma 3 4B) servido con
+- ~4,5 GB de disco para modelos. RAM medida del sistema completo durante una lección (backend + Qwen + Chrome):
+  ~4,7–6,2 GB de pico estimados (medido con Gemma: 5,8–7,3 GB; Qwen ocupa ~1,1 GB menos). Recomendado **8 GB o más**. No hace falta tarjeta gráfica; si Ollama encuentra una, la usa.
+- **Gratis y 100 % local** por defecto: el tutor es un modelo de lenguaje local (Qwen 3.5 4B) servido con
   [Ollama](https://ollama.com). Opcional: la API de Claude (de pago, aparte de la suscripción de Claude) para una
   conversación y una evaluación de más calidad. Sin ninguno de los dos arranca en **modo demo** (tutor guionizado).
 - Chrome, Edge o Safari recientes. **Recomendado: auriculares** (evita que el micrófono capte al tutor).
@@ -59,7 +58,7 @@ git clone https://github.com/conororuiz/english_practice_assistence.git english-
 cd english-voice-tutor
 
 # 3. Modelo del tutor (3,3 GB)
-ollama pull gemma3:4b
+ollama pull qwen3.5:4b
 
 # 4. Dependencias de Python y modelos de voz (~830 MB)
 uv sync
@@ -92,7 +91,7 @@ git clone https://github.com/conororuiz/english_practice_assistence.git english-
 cd english-voice-tutor
 
 # 3. Modelo del tutor (3,3 GB)
-ollama pull gemma3:4b
+ollama pull qwen3.5:4b
 
 # 4. Dependencias de Python y modelos de voz (~830 MB)
 uv sync
@@ -120,7 +119,7 @@ cd english-voice-tutor
 
 # 3. Modelo del tutor (3,3 GB). Ollama tiene que estar en marcha para descargar:
 ollama serve &                    # o abre la app Ollama
-ollama pull gemma3:4b
+ollama pull qwen3.5:4b
 
 # 4. Dependencias de Python y modelos de voz (~830 MB; +464 MB en Apple Silicon)
 uv sync
@@ -155,7 +154,7 @@ Para actualizar a la última versión: `git pull`, `uv sync` y `uv run python sc
 | Síntoma | Solución |
 |---|---|
 | `uv`, `ollama` o `git` «no se reconoce como comando» | Cierra y vuelve a abrir la terminal tras instalarlos |
-| La app arranca en **modo demo** | Ollama no responde o falta el modelo: `ollama list` debe mostrar `gemma3:4b` |
+| La app arranca en **modo demo** | Ollama no responde o falta el modelo: `ollama list` debe mostrar `qwen3.5:4b` |
 | `Faltan modelos: …` | Ejecuta `uv run python scripts/download_models.py` (se puede repetir; reanuda lo que falte) |
 | El tutor no te oye | Permiso de micrófono del navegador (icono del candado) y del sistema; usa `http://127.0.0.1:8765`, no la IP |
 | El tutor se interrumpe a sí mismo | Usa auriculares |
@@ -170,7 +169,7 @@ uv run python scripts/eval_turns.py           # banco de fin de turno (cortes pr
 uv run python scripts/eval_turns.py --wav mi_grabacion.wav --end 7.4   # con una grabación tuya
 uv run python scripts/measure_memory.py       # RAM con modelos y pico bajo carga
 uv run python scripts/compare_llm.py gemma3:4b qwen3.5:4b   # compara modelos locales como tutor
-uv run python scripts/simulate_class.py --classes 3   # clases completas sólo texto: Gemma de profesor y de alumno
+uv run python scripts/simulate_class.py --classes 3   # clases completas sólo texto: el modelo local de profesor y de alumno
 TUTOR_LESSON_SECONDS=60 uv run python -m tutor.main   # y en otra terminal:
 uv run python scripts/ws_smoke.py             # lección de punta a punta por WebSocket
 uv run --with playwright python scripts/browser_e2e.py   # la interfaz real en Chrome headless
@@ -199,7 +198,7 @@ y descomenta lo que quieras cambiar.
 | Variable | Por defecto | |
 |---|---|---|
 | `TUTOR_LLM` | `auto` | `auto` = Ollama si está; si no, Claude si hay clave; si no, demo. O fuerza `ollama` / `anthropic` / `mock` |
-| `TUTOR_OLLAMA_MODEL` | `gemma3:4b` | Modelo local (alternativa ligera: `qwen3.5:4b`) |
+| `TUTOR_OLLAMA_MODEL` | `qwen3.5:4b` | Modelo local (alternativa: `gemma3:4b`, algo más rápido, explica peor) |
 | `ANTHROPIC_API_KEY` | — | Opcional (API de pago de Claude) |
 | `TUTOR_CHAT_MODEL` / `TUTOR_CHAT_EFFORT` | `claude-opus-5-5` / `low` | Modelo y esfuerzo de la conversación |
 | `TUTOR_EVAL_MODEL` / `TUTOR_EVAL_EFFORT` | `claude-opus-5-5` / `low` | Evaluación de cada turno |

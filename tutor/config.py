@@ -49,7 +49,7 @@ class Settings:
     # "ollama" | "anthropic" | "mock" fuerzan un proveedor ("mock" = tutor guionizado, sin IA).
     llm_provider: str = _env("TUTOR_LLM", "auto")
     ollama_url: str = _env("TUTOR_OLLAMA_URL", "http://127.0.0.1:11434")
-    ollama_model: str = _env("TUTOR_OLLAMA_MODEL", "gemma3:4b")
+    ollama_model: str = _env("TUTOR_OLLAMA_MODEL", "qwen3.5:4b")
     chat_model: str = _env("TUTOR_CHAT_MODEL", "claude-opus-5-5")
     chat_effort: str = _env("TUTOR_CHAT_EFFORT", "low")
     eval_model: str = _env("TUTOR_EVAL_MODEL", "claude-opus-5-5")

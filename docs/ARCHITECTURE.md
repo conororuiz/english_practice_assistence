@@ -6,7 +6,7 @@ Las cifras de rendimiento son **medidas** en un MacBook con Apple M4 (16 GB), sa
 ---
 
 > **Actualización (modo gratuito por defecto).** El razonamiento ya no requiere la API de pago: por defecto
-> se usa un modelo local, **Gemma 3 4B** vía Ollama, y todo el sistema funciona sin coste y sin conexión. La
+> se usa un modelo local, **Qwen 3.5 4B** vía Ollama, y todo el sistema funciona sin coste y sin conexión. La
 > API de Claude sigue disponible como opción de más calidad (`TUTOR_LLM=anthropic`). Ver §12.
 
 ## 1. Requisitos y ambigüedades resueltas
@@ -323,7 +323,9 @@ gratuita. Un modelo local de ~4B parámetros cabe en el límite de 8 GB junto co
 | Errores detectados (con reglas) | 6/6 | 5/6 |
 | Memoria del sistema ocupada (8k de contexto) | ~4.8–5.2 GB | ~3.8 GB |
 
-Se elige **Gemma 3 4B** por calidad conversacional y latencia; Qwen 3.5 4B queda como opción ligera.
+Se eligió primero **Gemma 3 4B** por calidad conversacional y latencia. Desde el 2026-10-23 el modelo por defecto es
+**Qwen 3.5 4B** (decisión del usuario, ver §15): explica la gramática mucho mejor en el análisis de respuestas y
+ocupa ~1,1 GB menos; Gemma queda como alternativa (`TUTOR_OLLAMA_MODEL=gemma3:4b`).
 
 **Memoria total medida** (lección completa en Chrome: backend + Ollama/Gemma + navegador, incremento de memoria
 ocupada del sistema): **5.8–7.3 GB** de pico en dos ejecuciones → dentro de 8 GB, con poco margen. Con Qwen ~1.1 GB menos.
@@ -437,3 +439,6 @@ guarda en `turns.eval_json["feedback"]` y vuelve en el resumen (`summary.feedbac
   que el análisis suele llegar durante la respuesta siguiente. Al terminar se esperan como mucho 15 s.
 - Comparativa con 5 respuestas reales: qwen3.5:4b explica bastante mejor que gemma3:4b (gemma inventa reglas,
   "have + participio" para "had a party"), pero es ~1,5× más lento.
+- Desde el 2026-10-23 Qwen 3.5 4B es el modelo por defecto. Clase simulada completa (`scripts/simulate_class.py`):
+  latencia media del profesor 4,2 s, sigue los 6 pasos y corrige siempre la -s. Defecto visto: a veces empieza con
+  "Perfect!" y a continuación corrige, y repite mucho la fórmula "Just one small thing… Can you say that part again?".
