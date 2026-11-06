@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .ai.llm import AnthropicLLM
@@ -113,7 +113,30 @@ async def profile():
                       for v in vocab["items"][:60]],
             "next_plan": plan_next_lesson(mem).to_dict(),
             "route": _route(mem),
+            "phrases": [{k: p[k] for k in ("better", "said", "why_es", "sentence", "box", "next_due", "best_score")}
+                        for p in mem.phrases()],
             "last_summary": sessions[0]["summary"] if sessions else None}
+
+
+@app.get("/api/tts")
+async def tts(text: str):
+    """Voz del profesor para una frase del mazo (botón 🔊 de «Tu progreso»)."""
+    import io
+    import wave
+
+    import numpy as np
+
+    text = text.strip()[:300]
+    if not text or state.models is None:
+        return JSONResponse({"error": "sin texto"}, status_code=400)
+    audio = await asyncio.get_running_loop().run_in_executor(state.models.tts_pool, state.models.tts.synthesize, text)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+    return Response(buf.getvalue(), media_type="audio/wav")
 
 
 def _route(mem: UserMemory) -> list[dict]:
@@ -182,6 +205,8 @@ async def lesson_ws(ws: WebSocket):
                         await session.on_playback_done(int(data.get("reply_id", 0)))
                     elif kind == "end":
                         await session.stop("user_ended")
+                    elif kind in ("help", "translate", "repeat", "slower", "repeat_phrase"):
+                        await session.on_command(kind, data)
                 if session.finished and session.summary is not None:
                     break
         except WebSocketDisconnect:

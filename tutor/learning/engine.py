@@ -224,6 +224,15 @@ class LearningEngine:
                 "correct": correct, "major": major, "minor": minor, "drills_ok": len(drills_ok),
                 "drills_tried": len(drills_tried), "words_used": after["words_used"], "words_total": len(plan.unit["vocab"])}
 
+    def apply_facts(self, name: str, facts: list[str]) -> None:
+        """Nombre y datos personales del alumno, para las próximas clases."""
+        from ..ai.facts import merge_facts
+        profile = self.memory.profile()
+        if name:
+            profile["name"] = name
+        profile["facts"] = merge_facts(profile.get("facts", []), facts)
+        self.memory.save_profile(profile)
+
     def apply_summary_profile(self, strengths: list[str], weaknesses: list[str]) -> None:
         profile = self.memory.profile()
         profile["strengths"] = strengths[:4]

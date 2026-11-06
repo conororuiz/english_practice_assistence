@@ -111,5 +111,24 @@ svg.spark circle { fill: var(--accent); }
 .sug .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 .sug .better { font-size: 15px; }
 .sug s { color: var(--danger); }
+.sug .old { color: var(--muted); }
+.sug del { color: var(--danger); text-decoration: line-through; text-decoration-thickness: 2px; }
+.sug mark { background: none; color: var(--warn); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 .sug .lbl { color: var(--muted); }
 .sug .ex { font-style: italic; }
+
+/* Ayudas durante la clase */
+.tools { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 10px 0 0; }
+.assist { max-width: 560px; margin: 10px auto 0; padding: 12px 14px; border-radius: 12px; background: rgba(127,127,127,.1); text-align: left; }
+.assist .lbl, .rep .lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; opacity: .7; margin-bottom: 4px; }
+.assist .target { font-size: 18px; font-weight: 600; margin: 0; }
+.starters { margin: 0; padding-left: 18px; }
+.starters li { margin: 2px 0; }
+.score { font-weight: 700; }
+.score.ok { color: #16a34a; } .score.mid { color: #d97706; } .score.low { color: #dc2626; }
+.say { margin-top: 6px; }
+.rep { margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(127,127,127,.35); }
+.deck { list-style: none; padding: 0; margin: 0; }
+.deck li { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid rgba(127,127,127,.15); }
+.deck li.due { font-weight: 500; }
+.deck .play { padding: 2px 8px; }

@@ -51,6 +51,7 @@ class LessonPlan:
     just_mastered: str | None = None  # título de la unidad recién dominada (para felicitar al empezar)
     production_scenario: str = ""  # contexto concreto de la conversación libre
     talk: list[str] = field(default_factory=list)  # preguntas para la conversación real, en orden
+    deck: list[dict] = field(default_factory=list)  # frases del mazo que tocan repasar hoy [{better, said, why_es}]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -195,6 +196,7 @@ def plan_next_lesson(memory: UserMemory, now: float | None = None) -> LessonPlan
         just_mastered=just_mastered,
         production_scenario=f"{unit.production} Setting: {scenario.title}.",
         talk=_rotate(list(TALK.get(unit.key, ())), (unit_lesson - 1) * 2),
+        deck=[{k: p[k] for k in ("better", "said", "why_es", "sentence")} for p in memory.due_phrases(now, limit=3)],
     )
 
 

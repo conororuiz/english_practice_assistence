@@ -113,6 +113,23 @@ CREATE TABLE IF NOT EXISTS unit_progress (         -- ruta de aprendizaje: progr
     PRIMARY KEY (user_id, unit_key)
 );
 
+CREATE TABLE IF NOT EXISTS phrases (               -- mazo de frases: correcciones de clase con repetición espaciada
+    user_id         INTEGER NOT NULL,
+    better          TEXT NOT NULL,                  -- la frase (o fragmento) correcta
+    said            TEXT NOT NULL DEFAULT '',       -- lo que dijo el alumno
+    why_es          TEXT NOT NULL DEFAULT '',
+    sentence        TEXT NOT NULL DEFAULT '',       -- la frase completa corregida (para repetirla en voz alta)
+    box             INTEGER NOT NULL DEFAULT 0,     -- caja Leitner (0 = recién añadida)
+    next_due        REAL NOT NULL,
+    successes       INTEGER NOT NULL DEFAULT 0,
+    failures        INTEGER NOT NULL DEFAULT 0,
+    best_score      INTEGER NOT NULL DEFAULT 0,     -- mejor nota al repetirla («Dila tú»)
+    session_id      INTEGER,
+    created_at      REAL NOT NULL,
+    last_seen       REAL,
+    PRIMARY KEY (user_id, better)
+);
+
 CREATE TABLE IF NOT EXISTS vocab_events (
     id              INTEGER PRIMARY KEY,
     user_id         INTEGER NOT NULL,

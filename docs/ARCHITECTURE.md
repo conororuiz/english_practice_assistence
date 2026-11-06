@@ -442,3 +442,45 @@ guarda en `turns.eval_json["feedback"]` y vuelve en el resumen (`summary.feedbac
 - Desde el 2026-10-23 Qwen 3.5 4B es el modelo por defecto. Clase simulada completa (`scripts/simulate_class.py`):
   latencia media del profesor 4,2 s, sigue los 6 pasos y corrige siempre la -s. Defecto visto: a veces empieza con
   "Perfect!" y a continuación corrige, y repite mucho la fórmula "Just one small thing… Can you say that part again?".
+
+## 16. Correcciones precisas y conversación natural (2026-11-06)
+
+Revisión de la clase real del 2026-10-15 (`turns`/`errors` de la sesión 1). Problemas vistos y qué se hizo:
+
+| Visto en la clase | Cambio |
+|---|---|
+| 15 de 20 errores tenían como "original" la frase entera: no se veía qué palabra fallaba | `narrow_error` (evaluator.py) acota cada error del LLM al fragmento que cambia (+2 palabras antes y 1 después, sin cruzar comas); varios cambios separados → varios errores; si la corrección reescribe la frase (>3 cambios, un cambio de >6 palabras o más de la mitad de la frase) se descarta: no es un error concreto, la respuesta modelo del análisis ya enseña a decirlo |
+| La regla vio "he make" → "he makes" pero se perdió porque el LLM marcó la frase entera | Las reglas locales van primero y ganan en los solapes |
+| Texto del prompt colado en una corrección ("# I/you/we/they work · …"), explicaciones en inglés, "he make" como error menor | Se descarta el error con texto colado; explicación en inglés → genérica en español por categoría; errores de la estructura del día → siempre `major` (`upgrade_unit_errors`) |
+| En pantalla se tachaba toda la frase | `wordDiff` (app.js): tachado sólo lo que sobra o está mal, resaltado lo nuevo |
+| "You're using the present simple perfectly" sobre respuestas con errores; "You got all ten exercises correct" | `SpokenFilter` no pronuncia elogios de gramática que no se pueden comprobar ni "Perfect!" si las reglas ven errores; el cierre recibe las cifras reales (`_drill_results` cuenta también errores importantes y usa las reglas si la evaluación no ha llegado) |
+| "Instead of saying X, you could say X" (la misma frase) | El filtro no pronuncia correcciones cuyas dos citas son iguales |
+| "I don't know how to say lejos" → el profesor siguió sin dar "far" | `word_request` detecta "how do you say X / no sé cómo se dice X"; nota al profesor: dar la palabra primero (con `<vocab>`, así entra en el SRS) y seguir |
+| Dos o tres preguntas por turno | En conversación (no en los ejercicios) el filtro corta lo que viene después de la primera pregunta |
+| Repite fórmulas ("You're really getting the hang of this") | El agente guarda cómo empezó cada respuesta y pide no repetirlas |
+| No reacciona al contenido, repite los errores del alumno al resumir, acepta datos raros ("start at 3 a.m.") | Prompt: reaccionar a un detalle concreto, repetir sus ideas siempre en inglés correcto (corrección implícita), preguntar si algo no cuadra; en los ejercicios, primera vez que falla: pista sobre la palabra exacta para que se corrija solo, y la respuesta sólo si vuelve a fallar |
+| No recuerda nada del alumno entre clases | `tutor/ai/facts.py`: al terminar, nombre (regla) + hasta 6 datos personales (LLM), cada uno comprobado contra lo que dijo el alumno; se guardan en `users.profile_json` (`name`, `facts`, máx. 12, el nuevo sustituye al parecido) y van al system prompt; el saludo sigue uno de ellos |
+
+Banco de pruebas: `scripts/simulate_class.py --replay 1 -v` repite los turnos reales de la clase 1 con el profesor
+actual y muestra los análisis y los datos guardados. Tests: `tests/test_natural_tutor.py`.
+
+## 17. Ayudas a petición del alumno y mazo de frases (tanda 2, 2026-11-06)
+
+Botones bajo los subtítulos durante la clase (`on_command` en `tutor/session/lesson.py`, `tutor/ai/helper.py`). Nada
+de esto bloquea el bucle del audio (lo lento va en tareas aparte) ni entra en el historial del profesor.
+
+| Botón | Qué hace | Detalles |
+|---|---|---|
+| 🔁 Repite / 🐢 Más despacio | El profesor repite su última frase tal como sonó (con sus partes en español); despacio = velocidad 0.72 | Sólo si nadie habla (`_idle`); si no, `busy`. Se reproduce como respuesta "extra": no cambia el paso ni el historial |
+| 🇪🇸 Traducir | Traducción en pantalla (no se dice) | Lo que ya dijo en español (`<es>`) no se traduce; se valida que salga en español y se cachea |
+| 💡 Ayúdame a responder | 2-3 comienzos de frase ("My father leaves home at …") + hasta 3 palabras útiles | Qwen con su prompt; se descartan comienzos en español, largos o con pregunta; si faltan, reglas según el tipo de pregunta. Reinicia la espera de "no responde" y avisa al profesor |
+| 🎙️ Dila tú (en cada tarjeta de análisis) | El profesor dice la frase corregida completa ("Listen: … Now you."), el alumno la repite y recibe nota 0-100 con las palabras que cambian | La repetición no cuenta como turno de la clase; luego el profesor retoma su pregunta. ≥85 sube la frase de caja en el mazo |
+
+**Mazo de frases** (tabla `phrases`): cada corrección verificada (correction / more_natural con fragmento) entra al
+mazo al analizarse; vuelve al día siguiente y luego 1-3-5-10-21-45 días (cajas Leitner). Las que tocan hoy van en
+`plan.deck`: en el repaso el profesor pregunta algo cuya respuesta natural las necesita, y al cerrar la clase se mira
+si el alumno usó la forma correcta (sube) o repitió el error (vuelve a mañana). En «Progreso» se ve el mazo con
+🔊 (endpoint `/api/tts`) y el resumen final cuenta frases nuevas, repasadas y repetidas.
+
+Probado: `tests/test_class_helpers.py` (12 tests, incluido uno con modelos reales que pulsa Más despacio, Ayúdame,
+Traducir y Dila tú con audio sintético) y la web en Chrome headless contra Qwen: ayuda en ~5-9 s, traducción ~1.5 s.

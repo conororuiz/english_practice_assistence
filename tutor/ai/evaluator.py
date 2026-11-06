@@ -12,7 +12,7 @@ import re
 
 from ..learning.curriculum import GRAMMAR
 from ..learning.planner import LessonPlan
-from ..learning.route import ROUTE_BY_KEY, attempts_structure
+from ..learning.route import ROUTE_BY_KEY, attempts_structure, error_is_unit_related
 from .llm import LLM
 from .prompts import EVALUATOR_SYSTEM, evaluator_prompt
 from .schemas import DetectedError, ErrorList, StructureUse, TurnEvaluation, VocabUse
@@ -143,6 +143,24 @@ _HELP_REQUEST = re.compile(
     r"no (te )?entiendo|no he entendido|puedes repetir|otra vez)\b", re.I)
 
 
+_WORD_REQUEST = re.compile(
+    r"\b(?:how (?:do you|do i|can i|could i|would you|to|should i) say|(?:i )?(?:don't|do not) know how to say|"
+    r"what(?:'s| is) the word for|what(?:'s| is) (?:the english for|it in english)|"
+    r"c[oó]mo se dice|no s[eé] c[oó]mo (?:se )?dec(?:ir|e))\s+[\"“'‘]?([^,.?!\"”'’]{2,40}?)[\"”'’]?"
+    r"(?:\s+(?:in english|en ingl[eé]s))?\s*(?=[,.?!]|$|\s+(?:and|but|so|because)\b)", re.I)
+
+
+def word_request(text: str) -> str:
+    """Palabra o expresión que el alumno pide en inglés ("I don't know how to say lejos" → "lejos"), o ""."""
+    m = _WORD_REQUEST.search(text.replace("’", "'"))
+    if not m:
+        return ""
+    word = m.group(1).strip()
+    if word.lower() in ("it", "that", "this", "the word", "this word", "that word"):
+        return word  # no dijo qué palabra: el profesor le pregunta cuál
+    return word
+
+
 def asks_for_help(text: str) -> bool:
     """¿El alumno dice que no ha entendido o pide que se repita?"""
     return bool(_HELP_REQUEST.search(text.replace("’", "'")))
@@ -156,12 +174,93 @@ def _expanded(text: str) -> list[str]:
     return " ".join(_CONTRACTIONS.get(w, w) for w in _words(text)).split()
 
 
+_TOKEN_STRIP = " ,.;:!?\"'“”‘’()"
+CONTEXT_BEFORE, CONTEXT_AFTER = 2, 1  # palabras sin cambios alrededor del cambio, para que se entienda dónde está
+MAX_CHANGED_WORDS = 6  # un cambio más largo es reescribir la frase, no un error concreto
+MAX_CHANGES = 3
+
+
+def _norm_token(tok: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", tok.lower().replace("’", "'"))
+
+
+def narrow_error(e: DetectedError) -> list[DetectedError]:
+    """Acota un error al fragmento que realmente cambia (más un par de palabras de contexto). Los modelos pequeños
+    suelen dar la frase entera como "original"; así el alumno ve exactamente qué palabra está mal. Si la corrección
+    reescribe la frase (muchos cambios o muy largos) no es un error concreto y se descarta."""
+    o = [t for t in e.original.split() if _norm_token(t)]
+    c = [t for t in e.corrected.split() if _norm_token(t)]
+    no, nc = [_norm_token(t) for t in o], [_norm_token(t) for t in c]
+    ops = [op for op in difflib.SequenceMatcher(None, no, nc, autojunk=False).get_opcodes() if op[0] != "equal"]
+    if not ops:
+        return [e]  # sin cambios reales: plausible_error lo descartará
+    groups: list[list[tuple]] = [[ops[0]]]
+    for op in ops[1:]:
+        if op[1] - groups[-1][-1][2] <= 2:  # cambios separados por 1-2 palabras: un solo error
+            groups[-1].append(op)
+        else:
+            groups.append([op])
+    changed_total = sum(max(op[2] - op[1], op[4] - op[3]) for op in ops)
+    if len(groups) > MAX_CHANGES or (len(o) >= 8 and changed_total * 2 > len(o)):
+        return []  # reescribe la frase: no es un error concreto (la respuesta modelo ya enseña cómo decirlo)
+    out = []
+    for g in groups:
+        changed = max(g[-1][2] - g[0][1], g[-1][4] - g[0][3])
+        if changed > MAX_CHANGED_WORDS:
+            continue
+        before, after = CONTEXT_BEFORE, CONTEXT_AFTER
+        # el contexto no cruza una coma o un punto: "up, I get a" → "I get a"
+        for k in range(1, CONTEXT_BEFORE + 1):
+            if g[0][1] - k < 0 or re.search(r"[,.;:!?]$", o[g[0][1] - k]):
+                before = k - 1
+                break
+        last = o[g[-1][2] - 1] if g[-1][2] > g[-1][1] else ""
+        if re.search(r"[,.;:!?]$", last):
+            after = 0
+        i1, i2 = max(0, g[0][1] - before), min(len(o), g[-1][2] + after)
+        j1, j2 = max(0, g[0][3] - before), min(len(c), g[-1][4] + after)
+        orig = " ".join(o[i1:i2]).strip(_TOKEN_STRIP)
+        corr = " ".join(c[j1:j2]).strip(_TOKEN_STRIP)
+        if not (orig and corr):
+            continue
+        err = e.model_copy(update={"original": orig, "corrected": corr})
+        if len(groups) > 1:
+            # Una explicación para varios cambios sólo vale para el cambio del que habla.
+            touched = {w for op in g for w in no[op[1]:op[2]] + nc[op[3]:op[4]] if len(w) > 2}
+            expl = e.explanation_es.lower().replace("’", "'")
+            if not any(re.search(rf"\b{re.escape(w)}\b", expl) for w in touched):
+                err = err.model_copy(update={"explanation_es": ""})
+        out.append(err)
+    return out
+
+
+_SPANISH = re.compile(r"\b(el|la|los|las|que|qué|es|se|para|con|una?|por|del|de|en|y|tu|su|al|cuando|como|verbo|frase|más|"
+                      r"usa(mos)?|lleva|dice|significa|sin|mejor|aquí|después|antes)\b", re.I)
+
+
+def is_spanish(text: str) -> bool:
+    return len(_SPANISH.findall(text)) >= 2
+
+
+def fix_explanation(e: DetectedError) -> DetectedError:
+    """La explicación debe estar en español; si el modelo la escribió en inglés se sustituye por una genérica."""
+    if is_spanish(e.explanation_es):
+        return e
+    generic = {"naturalness": "Así lo diría un nativo; es más natural.", "word_choice": "Esta palabra es la que se usa en este caso.",
+               "preposition": "Esta es la preposición que se usa aquí.", "article": "Aquí hace falta (o sobra) el artículo.",
+               "word_order": "En inglés el orden de las palabras es este.", "verb_tense": "Este es el tiempo verbal que pide la frase."}
+    return e.model_copy(update={"explanation_es": generic.get(e.category, "Así es como se dice correctamente en inglés.")})
+
+
+_LEAK = re.compile(r"[#·→{}<>]|”,|\bskill_key\b|\bexplanation\b", re.I)
+
+
 def plausible_error(e: DetectedError, learner_text: str, unclear: list[str] | tuple = ()) -> bool:
     """Descarta "errores" inventados (frecuentes en modelos pequeños): el fragmento debe aparecer en lo que dijo el
     alumno, la corrección debe cambiar algo (expandir "I'm" a "I am" no cuenta), no vale cambiar sólo el sujeto o
     un pronombre, y no se juzgan palabras que el reconocedor de voz no entendió bien (no son errores del alumno)."""
-    if "*" in e.corrected or "*" in e.original:
-        return False
+    if "*" in e.corrected or "*" in e.original or _LEAK.search(e.corrected) or _LEAK.search(e.original):
+        return False  # texto del prompt o de código colado en la corrección
     orig, corr, said = _words(e.original), _words(e.corrected), " ".join(_words(learner_text))
     if not orig or orig == corr or " ".join(orig) not in said:
         return False
@@ -177,28 +276,45 @@ def plausible_error(e: DetectedError, learner_text: str, unclear: list[str] | tu
         diffs = [(a, b) for a, b in zip(orig, corr) if a != b]
         if diffs and all(a in _PRONOUNS and b in _PRONOUNS for a, b in diffs):
             return False
+    # Cambiar de persona ("I live" → "he lives") cambia lo que quiso decir; he ↔ she sí puede ser un error real.
+    persons = {"i": 1, "we": 1, "you": 2, "he": 3, "she": 3, "it": 3, "they": 3}
+    o_p = [persons[w] for w in orig if w in persons]
+    c_p = [persons[w] for w in corr if w in persons]
+    if o_p and c_p and len(o_p) == len(c_p) and o_p != c_p:
+        return False
     return True
 
 
 def merge_evaluations(llm: TurnEvaluation, rules: TurnEvaluation, learner_text: str = "",
                       unclear: list[str] | tuple = ()) -> TurnEvaluation:
-    """Errores del LLM verificados + errores de las reglas locales que el LLM no haya visto (sin duplicados)."""
-    errors: list[DetectedError] = []
-    for e in llm.errors:
-        if learner_text and not plausible_error(e, learner_text, unclear):
-            continue
-        if any(_overlaps(e.original, x.original) and _words(e.corrected) == _words(x.corrected) for x in errors):
-            continue  # el modelo local a veces repite el mismo error
-        errors.append(e)
-    for e in rules.errors:
-        if not any(_overlaps(e.original, x.original) for x in errors):
-            errors.append(e)
+    """Errores de las reglas locales (precisos y seguros) + errores del LLM acotados al fragmento que cambia,
+    verificados y que no se solapen con los de las reglas (sin duplicados)."""
+    errors: list[DetectedError] = list(rules.errors)
+    for raw in llm.errors:
+        if _LEAK.search(raw.corrected) or _LEAK.search(raw.original):
+            continue  # texto del prompt colado: el modelo se ha liado con todo el error
+        for e in narrow_error(raw):
+            if learner_text and not plausible_error(e, learner_text, unclear):
+                continue
+            if any(_overlaps(e.original, x.original) for x in errors):
+                continue  # ya lo marca una regla, o el modelo local repite el mismo error
+            errors.append(fix_explanation(e))
     vocab = list(llm.target_vocab_used)
     for v in rules.target_vocab_used:
         if not any(v.term.lower() == x.term.lower() for x in vocab):
             vocab.append(v)
     structures = list(llm.structures_used) or list(rules.structures_used)
     return llm.model_copy(update={"errors": errors, "target_vocab_used": vocab, "structures_used": structures})
+
+
+def upgrade_unit_errors(ev: TurnEvaluation, plan: LessonPlan | None) -> TurnEvaluation:
+    """Un error con la estructura de la clase de hoy siempre es importante: es lo que se está aprendiendo."""
+    unit = ROUTE_BY_KEY.get((plan.unit or {}).get("key", "")) if plan else None
+    if not unit:
+        return ev
+    errors = [e.model_copy(update={"severity": "major"}) if error_is_unit_related(unit, e.model_dump()) else e
+              for e in ev.errors]
+    return ev.model_copy(update={"errors": errors})
 
 
 class Evaluator:
@@ -237,7 +353,7 @@ class Evaluator:
                             if e.category in ("word_choice", "naturalness", "vocabulary")
                             and e.original.lower() not in recurring else e for e in found.errors]
             llm_part = TurnEvaluation(errors=found_errors, complexity=rules.complexity, understood_question=True)
-            merged = merge_evaluations(llm_part, rules, learner_text, unclear)
+            merged = upgrade_unit_errors(merge_evaluations(llm_part, rules, learner_text, unclear), plan)
             extra = [StructureUse(skill_key=e.skill_key, correct=False) for e in merged.errors
                      if e.skill_key in GRAMMAR and not any(s.skill_key == e.skill_key for s in rules.structures_used)]
             structures = [s for s in rules.structures_used
@@ -250,4 +366,4 @@ class Evaluator:
         except Exception as e:  # la evaluación nunca debe romper la lección
             log.warning("Evaluación LLM fallida (%s); usando reglas locales", e)
             return rules
-        return merge_evaluations(ev, rules, learner_text, unclear)
+        return upgrade_unit_errors(merge_evaluations(ev, rules, learner_text, unclear), plan)

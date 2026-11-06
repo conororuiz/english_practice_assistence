@@ -9,7 +9,7 @@ import time
 from ..audio.turn_detector import PatienceProfile
 from .curriculum import GRAMMAR
 from .db import Database
-from .srs import apply_vocab_event, review_interval_days, update_mastery, DAY
+from .srs import DAY, INTERVALS_DAYS, apply_vocab_event, interval_for_box, review_interval_days, update_mastery
 
 LEVELS = ("B1", "B1+", "B2", "B2+", "C1")
 
@@ -161,6 +161,47 @@ class UserMemory:
                           (self.user_id, pattern_key(original, corrected)))
         return int(row["n"]) if row else 0
 
+    # --- mazo de frases ---------------------------------------------------
+    def add_phrase(self, better: str, said: str, why_es: str, sentence: str, session_id: int | None,
+                   now: float | None = None) -> bool:
+        """Añade una corrección al mazo (vuelve mañana). Si ya estaba, la frase vuelve a caja 0: el error se repitió."""
+        now = now or time.time()
+        better = better.strip()
+        if not better:
+            return False
+        row = self.db.one("SELECT box FROM phrases WHERE user_id=? AND better=?", (self.user_id, better))
+        if row is None:
+            self.db.ex("INSERT INTO phrases(user_id, better, said, why_es, sentence, next_due, session_id, created_at) "
+                       "VALUES(?,?,?,?,?,?,?,?)", (self.user_id, better, said.strip(), why_es.strip(), sentence.strip(),
+                                                   now + interval_for_box(0), session_id, now))
+            return True
+        if session_id is not None:
+            self.db.ex("UPDATE phrases SET box=0, failures=failures+1, next_due=?, last_seen=?, said=? "
+                       "WHERE user_id=? AND better=? AND COALESCE(session_id, -1)<>?",
+                       (now + interval_for_box(0), now, said.strip(), self.user_id, better, session_id))
+        return False
+
+    def phrase_result(self, better: str, ok: bool, score: int | None = None, now: float | None = None) -> None:
+        """Repaso de una frase del mazo: bien → sube de caja; mal → vuelve a mañana."""
+        now = now or time.time()
+        row = self.db.one("SELECT box, best_score FROM phrases WHERE user_id=? AND better=?", (self.user_id, better))
+        if row is None:
+            return
+        box = min(row["box"] + 1, len(INTERVALS_DAYS) - 1) if ok else 0
+        best = max(row["best_score"], score or 0)
+        self.db.ex(f"UPDATE phrases SET box=?, next_due=?, last_seen=?, best_score=?, "
+                   f"{'successes=successes+1' if ok else 'failures=failures+1'} WHERE user_id=? AND better=?",
+                   (box, now + interval_for_box(box), now, best, self.user_id, better))
+
+    def due_phrases(self, now: float, limit: int = 3) -> list[dict]:
+        rows = self.db.q("SELECT * FROM phrases WHERE user_id=? AND next_due<=? ORDER BY next_due LIMIT ?",
+                         (self.user_id, now, limit))
+        return [dict(r) for r in rows]
+
+    def phrases(self, limit: int = 100) -> list[dict]:
+        rows = self.db.q("SELECT * FROM phrases WHERE user_id=? ORDER BY next_due LIMIT ?", (self.user_id, limit))
+        return [dict(r) for r in rows]
+
     # --- ruta de aprendizaje ---------------------------------------------
     def unit_progress(self, unit_key: str) -> dict | None:
         row = self.db.one("SELECT * FROM unit_progress WHERE user_id=? AND unit_key=?", (self.user_id, unit_key))
@@ -225,6 +266,8 @@ class UserMemory:
             "level": level,
             "level_score": score,
             "lessons_completed": self.db.count_completed_sessions(self.user_id),
+            "name": prof.get("name", ""),
+            "facts": prof.get("facts", []),
             "strengths": prof.get("strengths", []),
             "weaknesses": prof.get("weaknesses", []),
             "skills": {k: round(v["mastery"], 2) for k, v in sorted(skills.items(), key=lambda kv: kv[1]["mastery"])},

@@ -47,8 +47,10 @@ class TextToSpeech:
         self.voice_es = voice_es
         self.speed = speed
 
-    def synthesize(self, text: str) -> np.ndarray:
-        """Devuelve float32 mono a 24 kHz. Admite etiquetas <es>; ignora el resto de etiquetas."""
+    def synthesize(self, text: str, speed: float | None = None) -> np.ndarray:
+        """Devuelve float32 mono a 24 kHz. Admite etiquetas <es>; ignora el resto de etiquetas.
+        `speed` < 1 habla más despacio (botón «Más despacio»)."""
+        speed = speed or self.speed
         chunks: list[np.ndarray] = []
         gap = np.zeros(int(0.08 * OUTPUT_SR), dtype=np.float32)
         for span in split_languages(text):
@@ -56,8 +58,8 @@ class TextToSpeech:
             if not clean:
                 continue
             if span.lang == "es":
-                audio, _ = self._kokoro.create(clean, voice=self.voice_es, speed=self.speed, lang="es")
+                audio, _ = self._kokoro.create(clean, voice=self.voice_es, speed=speed, lang="es")
             else:
-                audio, _ = self._kokoro.create(clean, voice=self.voice_en, speed=self.speed, lang="en-us")
+                audio, _ = self._kokoro.create(clean, voice=self.voice_en, speed=speed, lang="en-us")
             chunks.extend([audio.astype(np.float32), gap])
         return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)

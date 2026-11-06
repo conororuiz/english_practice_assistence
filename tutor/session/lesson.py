@@ -33,8 +33,10 @@ import numpy as np
 from ..ai.conversation import ConversationAgent, SpokenFilter, visible_text
 from ..ai.prompts import drill_note, produce_reminder, teach_steps
 from ..ai.coach import Coach, worth_coaching
-from ..ai.evaluator import Evaluator, asks_for_help, rule_based_evaluation, term_used
+from ..ai.evaluator import Evaluator, asks_for_help, rule_based_evaluation, term_used, word_request
 from ..ai.llm import LLM
+from ..ai.facts import FactExtractor
+from ..ai.helper import Helper, compare_repeat, corrected_sentence, last_question, phrase_seen, repeat_reaction
 from ..ai.summarizer import Summarizer, build_summary_input
 from ..audio.tts import OUTPUT_SR
 from ..audio.turn_detector import FRAME_S, Ev, TurnDetector
@@ -45,7 +47,7 @@ from ..learning.engine import LearningEngine, LiveVocabLog
 from ..learning.fluency import turn_metrics
 from ..learning.memory import UserMemory
 from ..learning.planner import plan_next_lesson
-from ..learning.route import ROUTE_BY_KEY, drill_asked, error_is_unit_related
+from ..learning.route import ROUTE_BY_KEY, attempts_structure, drill_asked, error_is_unit_related
 from .models import Models
 
 log = logging.getLogger(__name__)
@@ -56,6 +58,8 @@ AUDIO_CHUNK_SAMPLES = OUTPUT_SR // 2  # trozos de 0.5 s hacia el navegador
 PHASE_ORDER = ("warmup", "teach", "drill", "produce", "review", "wrapup")
 # Límites de tiempo de cada paso (fracción de la clase): el paso cambia al llegar aquí aunque no haya terminado.
 PHASE_END = {"warmup": 0.07, "teach": 0.27, "drill": 0.55, "produce": 0.82, "review": 0.93}
+SLOW_SPEED = 0.72  # «Más despacio»
+REPEAT_OK = 85  # nota mínima de «Dila tú» para dar la frase del mazo por aprendida
 
 
 class Transport(Protocol):
@@ -103,6 +107,8 @@ class LessonSession:
         # Con un modelo local pequeño el resumen es determinista: sólo hechos medidos, nada inventado.
         self.summarizer = Summarizer(llm if use_llm_for_analysis and not local_llm else None, settings.summary_effort)
         self.engine = LearningEngine(self.memory)
+        self.facts = FactExtractor(llm if use_llm_for_analysis else None)
+        self.helper = Helper(llm if use_llm_for_analysis else None)
         self.detector = TurnDetector(self.memory.patience())
         self.vad = SileroVAD(models.vad_session)
         self.vocab = LiveVocabLog()
@@ -156,6 +162,12 @@ class LessonSession:
         self.finished = False
         self._clock_task: asyncio.Task | None = None
         self.summary: dict | None = None
+        # Ayudas a petición del alumno (botones)
+        self.last_spoken = ""  # última respuesta del profesor tal como sonó (con etiquetas <es>)
+        self.repeat_target: str | None = None  # «Dila tú»: frase que el alumno está repitiendo
+        self._repeat_key = ""  # su frase en el mazo (si viene de una corrección)
+        self.helps_used = 0
+        self.repeats: list[dict] = []
 
     # ------------------------------------------------------------------ ciclo de vida
     def elapsed(self) -> float:
@@ -217,7 +229,7 @@ class LessonSession:
             await self.t.send_json({"type": "state", "state": "user_pause"})
         elif ev == Ev.SPECULATE:
             text = self._turn_text()
-            if text and not self.ending:
+            if text and not self.ending and self.repeat_target is None:
                 self._start_reply(text, user_turn=None, speculative=True)
         elif ev in (Ev.END_OF_TURN, Ev.STUCK):
             await self._end_of_turn(stuck=ev == Ev.STUCK)
@@ -227,7 +239,11 @@ class LessonSession:
         elif ev == Ev.BARGE_IN:
             await self._barge_in()
         elif ev == Ev.NO_RESPONSE:
-            if not self.ending and (self.reply is None or self.reply.finished):
+            if self.repeat_target is not None:
+                self.repeat_target = None  # no lo intentó: la clase sigue donde estaba
+                await self.t.send_json({"type": "repeat_result", "cancelled": True})
+                self.detector.start_listening(self.audio_time, self.agent.last_tutor_text)
+            elif not self.ending and (self.reply is None or self.reply.finished):
                 self.next_notes.append("[The learner hasn't started answering for a while. Say something like 'Take your "
                                        "time' and rephrase your last question more simply, maybe giving an example.]")
                 self.detector.stop_listening()
@@ -291,6 +307,9 @@ class LessonSession:
         user_turn = {"text": text, "audio": metrics.to_dict(), "t_start": st.started_at, "stuck": stuck,
                      "completeness": round(st.completeness, 2), "final_silence": round(st.final_silence, 2)}
         log.info("🎤 %s  (silencio final %.2fs, c=%.2f%s)", text, st.final_silence, st.completeness, ", atascado" if stuck else "")
+        if self.repeat_target is not None:
+            await self._repeat_done(text)
+            return
         await self.t.send_json({"type": "user_final", "text": text, "stuck": stuck,
                                 "final_silence": round(st.final_silence, 2), "completeness": round(st.completeness, 2)})
         await self.t.send_json({"type": "state", "state": "thinking"})
@@ -342,8 +361,11 @@ class LessonSession:
 
     def _drill_results(self) -> tuple[int, int]:
         """(ejercicios bien, ejercicios respondidos) con las evaluaciones disponibles."""
-        done = [t for t in self.user_turns if t.get("drill") and t.get("eval")]
-        ok = sum(1 for t in done if not any(self._unit_error(e) for e in t["eval"].get("errors", [])))
+        done = [t for t in self.user_turns if t.get("drill")]
+
+        def errors(t: dict) -> list[dict]:  # sin evaluación todavía: las reglas instantáneas
+            return (t.get("eval") or {}).get("errors") or self._quick_errors(t["text"])
+        ok = sum(1 for t in done if not any(self._unit_error(e) or e["severity"] == "major" for e in errors(t)))
         return ok, len(done)
 
     def _practice_items(self) -> list[str]:
@@ -360,6 +382,9 @@ class LessonSession:
                     seen.add(key)
                     other.append(f"Error: \"{e['original']}\" → \"{e['corrected']}\" ({e['skill_key']})")
         items = (unit_items[:2] + other)[:3]
+        for p in self.plan.deck[:2]:  # mazo de frases: correcciones de clases anteriores que tocan hoy
+            items.insert(min(1, len(items)), f"Phrase from an earlier class: \"{p['better']}\" (they used to say "
+                         f"\"{p['said']}\"). Ask a question whose natural answer uses it.")
         for term in self.vocab.introduced:
             if term not in self.vocab.used and len(items) < 5:
                 items.append(f"Today's word not yet used by the learner: '{term}'")
@@ -389,8 +414,9 @@ class LessonSession:
                 errs = sorted(self._quick_errors(user_text), key=lambda e: not self._unit_error(e))
                 if errs:
                     found = f"\"{errs[0]['original']}\" → \"{errs[0]['corrected']}\" ({errs[0]['explanation_es']})"
+            unit_ok = bool(self.drill_is_asked and not found and self.unit and attempts_structure(self.unit, user_text))
             note = drill_note(drill, nxt, self.drill_is_asked, self.drill_retry, self.drill_pos + 1, len(self.drills),
-                              found)
+                              found, unit_ok)
             if not self.drill_is_asked and self.agent.last_phase != "drill":
                 note = ("[Make a short transition: \"Now let's practise.\" Then react briefly to what they just said and "
                         + note[1:])
@@ -452,6 +478,15 @@ class LessonSession:
                 notes.append(f"[The learner did NOT understand you or asked you to repeat (\"{user_turn['text'][:120]}\"). "
                              "Don't react as if they had answered. Say it again in simpler words with ONE short question "
                              "(maybe an example answer); you may add one short Spanish translation of it in <es>…</es>.]")
+            asked_word = word_request(user_turn.get("text", ""))
+            if asked_word.lower() in ("it", "that", "this", "the word", "this word", "that word"):
+                notes.append("[The learner wants to say a word but doesn't know it in English. Ask kindly which word "
+                             "they mean (they can say it in Spanish).]")
+            elif asked_word:
+                notes.append(f"[The learner asked how to say \"{asked_word}\" in English. FIRST give them the English "
+                             "word or expression (say it clearly, with the silent tag <vocab term=\"…\" es=\""
+                             f"{asked_word}\"/>), say their sentence again with it, in correct English, and invite them "
+                             "to use it. Then continue the class.]")
             if a.get("unclear_words"):
                 notes.append(f"[Speech recognition was unsure about: {', '.join(a['unclear_words'][:5])}. Don't guess "
                              "or suggest replacements for these words; if the meaning isn't clear, ask what they meant.]")
@@ -515,7 +550,9 @@ class LessonSession:
         phase = self._phase()
         if phase == "wrapup":
             ok, tried = self._drill_results()
-            self.agent.progress_hint = f" (today they got {ok} of {tried} exercises right)" if tried else ""
+            self.agent.progress_hint = (f" (today they got {ok} of {tried} exercises right — use exactly these numbers"
+                                        + ("" if ok == tried else "; don't say they got all of them right") + ")"
+                                        ) if tried else ""
         if speculative:
             notes = self._peek_notes(phase)
         else:
@@ -558,7 +595,9 @@ class LessonSession:
 
         producer = _spawn(produce())
         spoken_filter = SpokenFilter(self.plan.all_target_terms, allow_question=r.rescue,
-                                     teaching=r.phase == "teach")
+                                     teaching=r.phase == "teach",
+                                     has_errors=bool(self._quick_errors((r.user_turn or {}).get("text") or r.speculative_text or "")),
+                                     one_question=r.phase not in ("drill", "wrapup"))
         try:
             while True:
                 sentence = await queue.get()
@@ -665,6 +704,13 @@ class LessonSession:
     async def _coach(self, ut: dict, tutor_text: str) -> None:
         """Análisis de la respuesta para la pantalla (no se dice en voz alta: no interrumpe la clase)."""
         fb = (await self.coach.feedback(tutor_text, ut["text"], ut["eval"]["errors"], self.plan)).model_dump()
+        for sug in fb["suggestions"]:
+            sug["sentence"] = corrected_sentence(ut["text"], sug["you_said"], sug["better"]) \
+                if sug["kind"] != "richer_answer" else sug["better"]
+            if sug["kind"] in ("correction", "more_natural") and sug["you_said"].strip():
+                # Al mazo de frases: se repasa en las próximas clases (repetición espaciada).
+                sug["in_deck"] = True
+                self.memory.add_phrase(sug["better"], sug["you_said"], sug["why_es"], sug["sentence"], self.session_id)
         ut["feedback"] = fb
         self.db.set_turn_eval(ut["turn_id"], {**ut["eval"], "feedback": fb})
         await self.t.send_json({"type": "turn_feedback", "idx": ut["idx"], "text": ut["text"], "feedback": fb})
@@ -684,6 +730,8 @@ class LessonSession:
 
     def _commit_reply(self, r: Reply, events: list, interrupted: bool) -> None:
         spoken = " ".join(r.spoken)
+        if spoken.strip():
+            self.last_spoken = spoken
         # Al historial (y a la base de datos) va lo que de verdad sonó: si el filtro quitó algo (p. ej. traducciones
         # al español de cada pregunta), el modelo no debe verlo en su historial o lo seguirá repitiendo.
         filtered = visible_text(spoken) != visible_text(r.raw)
@@ -752,6 +800,112 @@ class LessonSession:
             return
         self.detector.start_listening(self.audio_time, self.agent.last_tutor_text)
         await self.t.send_json({"type": "state", "state": "listening"})
+
+    # ------------------------------------------------------------------ ayudas a petición del alumno
+    def _idle(self) -> bool:
+        """Nadie está hablando ni hay una respuesta en preparación: se puede hablar fuera del guion."""
+        r = self.reply
+        return (not self.finished and not self.ending and not self.tutor_speaking and not self.detector.in_turn
+                and (r is None or r.finished))
+
+    async def on_command(self, kind: str, data: dict) -> None:
+        """Botones de la pantalla. Nunca bloquean el bucle del audio: lo lento va en una tarea aparte."""
+        if self.finished or not self.t0:
+            return
+        if kind == "help":
+            _spawn(self._help())
+        elif kind == "translate":
+            _spawn(self._translate())
+        elif kind in ("repeat", "slower"):
+            if not self.last_spoken or not self._idle():
+                await self.t.send_json({"type": "busy", "what": kind})
+                return
+            _spawn(self._play_extra(self.last_spoken, SLOW_SPEED if kind == "slower" else None))
+        elif kind == "repeat_phrase":
+            target = re.sub(r"\s+", " ", str(data.get("text", ""))).strip()
+            if not target or len(target.split()) > 30 or not self._idle():
+                await self.t.send_json({"type": "busy", "what": kind})
+                return
+            self.repeat_target = target
+            self._repeat_key = str(data.get("key", "")).strip()
+            await self.t.send_json({"type": "repeat_start", "target": target})
+            _spawn(self._play_extra(f"Listen: {target} Now you.", 0.85))
+
+    async def _play_extra(self, text: str, speed: float | None = None) -> None:
+        """Habla fuera del flujo de la clase (repetir una frase, modelo para «Dila tú»): no toca el historial del
+        profesor ni el paso de la clase. Al terminar de sonar, se vuelve a escuchar como siempre."""
+        self.detector.stop_listening()
+        self.tutor_speaking = True
+        self._reply_ids += 1
+        r = Reply(self._reply_ids, [], self.agent.last_phase or "warmup", None, audible=True, finished=True)
+        r.spoken = [text]
+        self.reply = r
+        await self.t.send_json({"type": "state", "state": "tutor_speaking"})
+        audio = await asyncio.get_running_loop().run_in_executor(self.models.tts_pool, self.models.tts.synthesize,
+                                                                 text, speed)
+        r.audible_at = time.monotonic()
+        r.audio_seconds = len(audio) / OUTPUT_SR
+        await self.t.send_json({"type": "tutor_text", "reply_id": r.id, "text": visible_text(text), "extra": True})
+        for i in range(0, len(audio), AUDIO_CHUNK_SAMPLES):
+            await self.t.send_bytes(struct.pack("<I", r.id) + _to_pcm16(audio[i:i + AUDIO_CHUNK_SAMPLES]))
+        await self.t.send_json({"type": "reply_end", "reply_id": r.id, "audio_seconds": round(r.audio_seconds, 2),
+                                "final": False})
+
+    async def _help(self) -> None:
+        tutor_text = self._current_tutor_text()
+        if not tutor_text:
+            return
+        self.helps_used += 1
+        if self.detector.listening and not self.detector.in_turn:
+            self.detector.start_listening(self.audio_time, tutor_text)  # está leyendo la ayuda: no le metas prisa
+        unit_form = (self.plan.unit or {}).get("form", "")
+        h = await self.helper.help(tutor_text, unit_form, self.snapshot.get("facts") or [])
+        self.next_notes.append("[The learner pressed 'help me answer' and saw these sentence starters: "
+                               + " / ".join(h.starters) + ". If they use one, great: react to their idea.]")
+        await self.t.send_json({"type": "help", "question": last_question(tutor_text), "starters": h.starters,
+                                "words": [w.model_dump() for w in h.words]})
+
+    async def _translate(self) -> None:
+        text = self._current_tutor_text(raw=True)  # con <es>: lo que ya dijo en español no se traduce
+        es = await self.helper.translate(text)
+        await self.t.send_json({"type": "translation", "source": visible_text(text), "text": es})
+
+    def _current_tutor_text(self, raw: bool = False) -> str:
+        r = self.reply
+        if r and r.audible and not r.finished and r.spoken:
+            text = " ".join(r.spoken)  # todavía está hablando: lo que ya ha dicho
+        else:
+            text = self.last_spoken or self.agent.last_tutor_text
+        return text if raw else visible_text(text)
+
+    async def _repeat_done(self, said: str) -> None:
+        """El alumno ha repetido la frase de «Dila tú»: nota palabra a palabra y vuelta a la clase."""
+        target, key = self.repeat_target or "", self._repeat_key
+        self.repeat_target = None
+        self.capturing = False
+        res = compare_repeat(target, said, self._turn_unclear())
+        if key:
+            self.memory.phrase_result(key, res["score"] >= REPEAT_OK, res["score"])
+        self.repeats.append({"target": target, "said": said, "score": res["score"]})
+        await self.t.send_json({"type": "repeat_result", "target": target, "said": said, **res})
+        question = last_question(self.agent.last_tutor_text)
+        line = repeat_reaction(res["score"])
+        if question.endswith("?"):
+            line += f" Back to my question: {question}"
+        await self._play_extra(line)
+
+    def _deck_review(self) -> list[dict]:
+        """Frases del mazo que tocaban hoy: ¿las usó bien o repitió el error?"""
+        out = []
+        said_today = [ut["text"] for ut in self.user_turns]
+        for p in self.plan.deck:
+            ok = any(phrase_seen(p["better"], t) for t in said_today)
+            bad = not ok and p["said"].strip().lower() != p["better"].strip().lower() and \
+                any(phrase_seen(p["said"], t) for t in said_today)
+            if ok or bad:
+                self.memory.phrase_result(p["better"], ok)
+                out.append({"better": p["better"], "said": p["said"], "ok": ok})
+        return out
 
     # ------------------------------------------------------------------ reloj
     async def _clock_loop(self) -> None:
@@ -832,6 +986,7 @@ class LessonSession:
             self.summary = {"aborted": True, "reason": reason, "feedback": feedback}
             await self.t.send_json({"type": "summary", "summary": self.summary})
             return
+        deck_review = self._deck_review()
         lesson_seconds = min(self.elapsed(), self.s.lesson_seconds) or self.s.lesson_seconds
         metrics = self.engine.finalize(self.session_id, self.plan, self.user_turns, self.vocab, lesson_seconds)
         metrics["duration_s"] = round(self.elapsed(), 1)
@@ -841,15 +996,21 @@ class LessonSession:
         snapshot = self.memory.snapshot()
         next_plan = plan_next_lesson(self.memory)
         data = build_summary_input(metrics, self.plan, next_plan, snapshot, self.corrections_given)
-        summary = await self.summarizer.summarize(data, self.plan)
+        summary, learned = await asyncio.gather(self.summarizer.summarize(data, self.plan),
+                                                self.facts.extract([ut["text"] for ut in self.user_turns]))
         self.engine.apply_summary_profile(summary.strengths, summary.weaknesses)
+        self.engine.apply_facts(learned.name, learned.facts)
         self.summary = {**summary.model_dump(), "level": metrics["level"], "fluency_index": metrics["fluency_index"],
                         "fluency_trend": metrics["fluency_trend"], "lesson_number": self.plan.lesson_number,
                         "fluency": metrics["fluency"], "duration_s": metrics["duration_s"], "reason": reason,
                         "next_lesson": next_plan.title, "unit": metrics.get("unit"),
                         "next_unit": {"title": next_plan.title, "number": next_plan.unit_number,
                                       "lesson": next_plan.unit_lesson},
-                        "feedback": feedback}
+                        "feedback": feedback,
+                        "deck": {"added": [s_["better"] for f in feedback for s_ in f["feedback"]["suggestions"]
+                                           if s_.get("in_deck")],
+                                 "reviewed": deck_review, "repeats": self.repeats},
+                        "helps_used": self.helps_used}
         self.db.finish_session(self.session_id, metrics, self.summary)
         await self.t.send_json({"type": "summary", "summary": self.summary})
 

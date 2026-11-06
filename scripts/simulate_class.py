@@ -7,6 +7,8 @@ Sirve para revisar el guion de la clase (pasos, ejercicios, correcciones) y la p
     uv run python scripts/simulate_class.py                    # una clase, BD temporal
     uv run python scripts/simulate_class.py --classes 3        # tres clases seguidas (progreso en la ruta)
     uv run python scripts/simulate_class.py --errors high      # alumno con muchos errores
+    uv run python scripts/simulate_class.py --replay 1 -v      # el alumno repite sus turnos reales de la clase 1
+                                                               # (de data/tutor.db) y se muestran los análisis
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sqlite3
 import sys
 import tempfile
 import time
@@ -80,7 +83,13 @@ async def learner_says(llm: OllamaLLM, system: str, history: list[dict]) -> str:
     return visible_text(out).strip().strip('"') or "Sorry, can you repeat?"
 
 
-async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool) -> dict:
+def real_turns(session_id: int, path: str = "data/tutor.db") -> list[str]:
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    rows = con.execute("SELECT text FROM turns WHERE session_id = ? AND role = 'user' ORDER BY idx, id", (session_id,))
+    return [r[0] for r in rows]
+
+
+async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool, replay: list[str] | None = None) -> dict:
     sink = Sink()
     s = settings
     session = LessonSession(s, FakeModels(), db, llm, sink, local_llm=True)  # type: ignore[arg-type]
@@ -113,7 +122,12 @@ async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool) ->
         if pending:  # en una clase real, la evaluación corre mientras el alumno piensa y habla (~5-8 s)
             await asyncio.wait(pending, timeout=8)
         learner_hist.append({"role": "user", "content": tutor})
-        said = await learner_says(llm, learner_sys, learner_hist)
+        if replay is not None:
+            if not replay:
+                break
+            said = replay.pop(0)
+        else:
+            said = await learner_says(llm, learner_sys, learner_hist)
         learner_hist.append({"role": "assistant", "content": said})
         words = len(said.split())
         speech = words / 1.9
@@ -137,6 +151,14 @@ async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool) ->
     if verbose:
         for item in summ.get("improve", []):
             print("    mejorar:", item)
+        for f in summ.get("feedback", []):
+            fb = f["feedback"]
+            print(f"\n  🎤 {f['text']}\n     {fb['analysis_es']}")
+            for sg in fb["suggestions"]:
+                print(f"     [{sg['kind']}] {sg['you_said']!r} → {sg['better']!r}\n        por qué: {sg['why_es']}"
+                      f"\n        cómo: {sg['how_es']}")
+        prof = session.memory.profile()
+        print(f"\n--- nombre: {prof.get('name', '')!r} · datos: {prof.get('facts', [])}")
     return summ
 
 
@@ -146,6 +168,7 @@ async def main() -> None:
     ap.add_argument("--errors", choices=list(ERRORS), default="mid")
     ap.add_argument("--db", help="BD a usar (por defecto, una temporal nueva)")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--replay", type=int, help="id de una clase de data/tutor.db: el alumno repite sus turnos reales")
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING)
     server = OllamaServer(settings.ollama_url)
@@ -155,7 +178,7 @@ async def main() -> None:
     db = Database(a.db or Path(tempfile.mkdtemp()) / "sim.db")
     try:
         for _ in range(a.classes):
-            await run_class(llm, db, a.errors, a.verbose)
+            await run_class(llm, db, a.errors, a.verbose, real_turns(a.replay) if a.replay else None)
     finally:
         await llm.unload()
         server.stop()

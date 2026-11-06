@@ -13,7 +13,7 @@ import re
 
 from ..learning.planner import LessonPlan
 from ..learning.route import ROUTE
-from .evaluator import _overlaps, _words, plausible_error
+from .evaluator import _overlaps, _words, is_spanish, plausible_error
 from .llm import LLM
 from .prompts import COACH_SYSTEM, coach_prompt
 from .schemas import DetectedError, Suggestion, TurnFeedback
@@ -21,16 +21,10 @@ from .schemas import DetectedError, Suggestion, TurnFeedback
 log = logging.getLogger(__name__)
 
 MAX_SUGGESTIONS = 3
-_SPANISH = re.compile(r"\b(el|la|los|las|que|qué|es|se|para|con|una?|por|del|de|en|y|tu|su|al|cuando|como|verbo|frase|más|usa(mos)?)\b",
-                      re.I)
 
 
 def worth_coaching(text: str) -> bool:
     return len(_words(text)) >= 2
-
-
-def is_spanish(text: str) -> bool:
-    return len(_SPANISH.findall(text)) >= 2
 
 
 def _unit_example(unit, avoid: str) -> str:

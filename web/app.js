@@ -103,6 +103,7 @@ async function start() {
   player.onDone = (id) => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "playback_done", reply_id: id }));
   $("start").classList.add("hidden");
   $("end").classList.remove("hidden");
+  $("tools").classList.remove("hidden");
 }
 
 function onAudio(buf) {
@@ -168,8 +169,46 @@ function onJson(m) {
     case "error":
       banner(m.message);
       break;
+    case "busy":
+      assist(`<p class="muted">${m.what === "repeat_phrase" ? "Espera a que termine el turno y vuelve a pulsar «Dila tú»." : "Espera a que termine el turno actual y vuelve a pulsar."}</p>`);
+      break;
+    case "translation":
+      assist(m.text ? `<div class="lbl">Traducción</div><p>${esc(m.text)}</p>` : `<p class="muted">No he podido traducirlo esta vez.</p>`);
+      break;
+    case "help":
+      assist(`<div class="lbl">Puedes empezar así</div>
+        <ul class="starters">${m.starters.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        ${m.words?.length ? `<p class="muted">${m.words.map((w) => `<b>${esc(w.en)}</b> = ${esc(w.es)}`).join(" · ")}</p>` : ""}`);
+      break;
+    case "repeat_start":
+      assist(`<div class="lbl">Escucha y repite</div><p class="target">${esc(m.target)}</p>`);
+      break;
+    case "repeat_result":
+      if (m.cancelled) { assist(""); break; }
+      showRepeat(m);
+      break;
   }
 }
+
+function assist(html) {
+  $("assist").innerHTML = html;
+  $("assist").classList.toggle("hidden", !html);
+}
+
+let repeatCard = null;
+function showRepeat(m) {
+  const missing = m.missing?.length ? `<p class="muted">Revisa: ${m.missing.map((w) => `<b>${esc(w)}</b>`).join(", ")}${m.unclear?.length ? ` · no se entendió bien: ${m.unclear.map(esc).join(", ")}` : ""}</p>` : "";
+  const html = `<div class="lbl">Tu repetición · <span class="score ${m.score >= 85 ? "ok" : m.score >= 70 ? "mid" : "low"}">${m.score}/100</span></div>
+    <p class="better">${wordDiff(m.said, m.target)}</p>${missing}`;
+  assist(html);
+  if (repeatCard) {
+    let box = repeatCard.querySelector(".rep");
+    if (!box) { box = document.createElement("div"); box.className = "rep"; repeatCard.appendChild(box); }
+    box.innerHTML = html;
+  }
+}
+
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
 function cleanup() {
   try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch {}
@@ -180,6 +219,9 @@ function cleanup() {
   $("start").disabled = false;
   $("start").textContent = "Nueva clase";
   $("steps").classList.add("hidden");
+  $("tools").classList.add("hidden");
+  assist("");
+  document.querySelectorAll(".say").forEach((b) => b.remove());
   loadToday();
   $("end").classList.add("hidden");
 }
@@ -221,6 +263,25 @@ function setStatus(t) { $("status").textContent = t; }
 function banner(t) { $("banner").textContent = t; $("banner").classList.remove("hidden"); }
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
+// Marca palabra a palabra qué cambia: lo que sobra o está mal (tachado) y lo nuevo (resaltado).
+function wordDiff(said, better) {
+  const a = said.split(/\s+/).filter(Boolean), b = better.split(/\s+/).filter(Boolean);
+  const norm = (w) => w.toLowerCase().replace(/[’]/g, "'").replace(/[^a-z0-9']/g, "");
+  const n = a.length, m = b.length;
+  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      L[i][j] = norm(a[i]) === norm(b[j]) ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const left = [], right = [];
+  let i = 0, j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && norm(a[i]) === norm(b[j])) { left.push(esc(a[i])); right.push(esc(b[j])); i++; j++; }
+    else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) { right.push(`<mark>${esc(b[j])}</mark>`); j++; }
+    else { left.push(`<del>${esc(a[i])}</del>`); i++; }
+  }
+  return `<span class="old">${left.join(" ")}</span> → <b>${right.join(" ")}</b>`;
+}
+
 const KIND = { correction: "Corrección", more_natural: "Más natural", richer_answer: "Respuesta más completa" };
 
 function addFeedback(m) {
@@ -233,11 +294,16 @@ function addFeedback(m) {
     ${fb.suggestions.map((s) => `
       <div class="sug ${s.kind}">
         <div class="kind">${KIND[s.kind] || ""}</div>
-        <p class="better">${s.you_said ? `<s>${esc(s.you_said)}</s> → ` : ""}<b>${esc(s.better)}</b></p>
+        <p class="better">${s.you_said ? wordDiff(s.you_said, s.better) : `<b>${esc(s.better)}</b>`}</p>
         ${s.why_es ? `<p><span class="lbl">Por qué:</span> ${esc(s.why_es)}</p>` : ""}
         ${s.how_es ? `<p><span class="lbl">Cómo se usa:</span> ${esc(s.how_es)}</p>` : ""}
         ${s.example ? `<p class="ex"><span class="lbl">Otro ejemplo:</span> ${esc(s.example)}</p>` : ""}
+        ${ws && (s.sentence || s.better) ? `<button class="ghost small say" data-text="${esc(s.sentence || s.better)}" data-key="${s.in_deck ? esc(s.better) : ""}">🎙️ Dila tú</button>` : ""}
       </div>`).join("")}`;
+  card.querySelectorAll(".say").forEach((b) => (b.onclick = () => {
+    repeatCard = b.closest(".sug");
+    send({ type: "repeat_phrase", text: b.dataset.text, key: b.dataset.key });
+  }));
   $("feedback-list").prepend(card);
   $("feedback").classList.remove("hidden");
 }
@@ -257,6 +323,7 @@ function showSummary(s) {
       ${s.new_vocabulary?.length ? `<h3>📚 New vocabulary</h3><ul>${s.new_vocabulary.map((v) => `<li><b>${esc(v.term)}</b> — ${esc(v.meaning_es)}</li>`).join("")}</ul>` : ""}
       <h3>⚠️ Let's improve</h3><ul>${(s.improve || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
       <h3>💬 Useful expression</h3><p class="expr">"${esc(s.useful_expression)}" <span class="muted">— ${esc(s.useful_expression_es)}</span></p>
+      ${deckLine(s.deck)}
       <h3>Next class</h3><p>${esc(s.tomorrow)}</p>
       <div class="kpis">
         ${kpi(s.fluency?.speaking_wpm, "palabras/min")}
@@ -279,6 +346,17 @@ function unitCard(u, next) {
     <span class="muted">Dominio ${u.score_before}% → <b>${u.score}%</b> · ejercicios bien ${u.drills_ok}/${u.drills_tried} ·
       palabras usadas ${u.words_used}/${u.words_total}</span>${missing}</div>`;
 }
+function deckLine(d) {
+  if (!d) return "";
+  const parts = [];
+  if (d.added?.length) parts.push(`${d.added.length} frase${d.added.length === 1 ? "" : "s"} nueva${d.added.length === 1 ? "" : "s"} en tu mazo`);
+  const ok = (d.reviewed || []).filter((r) => r.ok), bad = (d.reviewed || []).filter((r) => !r.ok);
+  if (ok.length) parts.push(`usaste bien ${ok.map((r) => `“${esc(r.better)}”`).join(", ")}`);
+  if (bad.length) parts.push(`aún dijiste ${bad.map((r) => `“${esc(r.said)}”`).join(", ")} (vuelve mañana)`);
+  if (d.repeats?.length) parts.push(`repetiste ${d.repeats.length} frase${d.repeats.length === 1 ? "" : "s"} en voz alta`);
+  return parts.length ? `<h3>🃏 Tu mazo de frases</h3><p>${parts.join(" · ")}.</p>` : "";
+}
+function playText(text) { new Audio(`/api/tts?text=${encodeURIComponent(text)}`).play().catch(() => {}); }
 const kpi = (v, label) => `<div class="kpi"><b>${esc(v ?? "–")}</b><span>${esc(label)}</span></div>`;
 
 // ---------------------------------------------------------------- progreso
@@ -302,6 +380,7 @@ async function showProgress() {
     ${Object.keys(s.skills).length ? `<h3>Gramática (dominio)</h3><div class="chips">${Object.entries(s.skills).map(([k, v]) => `<span class="chip">${esc(k.replace(/_/g, " "))} ${Math.round(v * 100)}%</span>`).join("")}</div>` : ""}
     ${s.recurring_mistakes.length ? `<h3>Errores recurrentes</h3><ul>${s.recurring_mistakes.map((m) => `<li>"${esc(m.original)}" → "${esc(m.corrected)}" <span class="muted">(${m.count}×)</span></li>`).join("")}</ul>` : ""}
     ${r.vocab.length ? `<h3>Vocabulario</h3><div class="chips">${r.vocab.map((v) => `<span class="chip ${v.status}" title="${esc(v.meaning_es)}">${esc(v.term)}</span>`).join("")}</div>` : ""}
+    ${deckSection(r.phrases || [])}
     <h3>Próxima clase</h3>
     <p>${esc(plan.unit?.title_es || plan.title)} <span class="muted">(unidad ${plan.unit_number}, clase ${plan.unit_lesson} · ${esc(plan.weekly_goal)})</span></p>
     <h3>Tu ruta</h3>
@@ -310,7 +389,21 @@ async function showProgress() {
         <span>${esc(u.title_es)}${u.status === "current" ? `<div class="bar small"><i style="width:${u.score}%"></i></div>` : ""}</span>
         <span class="muted">${u.status === "mastered" ? "dominada" : u.status === "current" ? `${u.score}% · ${u.lessons} clase${u.lessons === 1 ? "" : "s"}` : ""}</span></li>`).join("")}
     </ul>
-    <p class="muted">Paciencia aprendida: pausa típica ${s.patience.pause_p50.toFixed(1)} s · pausas largas ${s.patience.pause_p90.toFixed(1)} s · multiplicador ×${s.patience.multiplier.toFixed(2)}</p>`;
+    <p class="muted" style="margin-top:14px">Paciencia aprendida: pausa típica ${s.patience.pause_p50.toFixed(1)} s · pausas largas ${s.patience.pause_p90.toFixed(1)} s · multiplicador ×${s.patience.multiplier.toFixed(2)}</p>`;
+}
+
+function deckSection(items) {
+  if (!items.length) return "";
+  const now = Date.now() / 1000;
+  const due = items.filter((p) => p.next_due <= now).length;
+  return `<h3>Tu mazo de frases <span class="muted">(${items.length} · ${due} para repasar hoy)</span></h3>
+    <ul class="deck">${items.slice(0, 40).map((p) => `
+      <li class="${p.next_due <= now ? "due" : ""}">
+        <button class="ghost small play" data-text="${esc(p.sentence || p.better)}" title="Escuchar">🔊</button>
+        <span>${p.said ? wordDiff(p.said, p.better) : `<b>${esc(p.better)}</b>`}
+          ${p.why_es ? `<br><span class="muted">${esc(p.why_es)}</span>` : ""}</span>
+        <span class="muted">${"●".repeat(p.box)}${"○".repeat(Math.max(0, 6 - p.box))}</span>
+      </li>`).join("")}</ul>`;
 }
 
 function sparkline(values) {
@@ -329,6 +422,14 @@ function view(name) {
 }
 
 $("start").onclick = start;
+$("t-repeat").onclick = () => send({ type: "repeat" });
+$("t-slower").onclick = () => send({ type: "slower" });
+$("t-translate").onclick = () => send({ type: "translate" });
+$("t-help").onclick = () => { assist(`<p class="muted">Pensando ideas…</p>`); send({ type: "help" }); };
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.(".play");
+  if (b) playText(b.dataset.text);
+});
 $("end").onclick = () => ws && ws.send(JSON.stringify({ type: "end" }));
 $("nav-lesson").onclick = () => view("lesson");
 $("nav-progress").onclick = () => view("progress");

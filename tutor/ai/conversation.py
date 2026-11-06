@@ -73,6 +73,17 @@ _TEACHING_CUE = re.compile(
     r"natural|we say|rule|with he|with she|verb|tense|you can say|you could say|useful (word|expression|phrase)|means|instead of|correct|remember|"
     r"try (saying|to say)|better to say|careful|<fix|<vocab", re.I)
 _ES_SPAN = re.compile(r"<es>(.*?)</es>", re.S)
+# Elogios que no se pueden comprobar en el momento (la evaluación llega después) o que son falsos si hay errores.
+_GRAMMAR_PRAISE = re.compile(r"\b(us(ing|ed|e)|got|said)\b[^.!?]*\b(perfectly|flawlessly|without (any )?mistakes)\b"
+                             r"|\bno mistakes\b|\b(all|every) (the )?(ten |\d+ )?(exercises|answers)( \w+)? (right|correct)\b", re.I)
+_PRAISE = re.compile(r"^\W*(perfect|exactly( right)?|excellent|fantastic|brilliant|spot on|well done|correct|that's right|"
+                     r"that's (perfect|correct|exactly right))\W*$|\b(perfect(ly)?|exactly right|spot on|flawless)\b", re.I)
+_QUOTED = re.compile(r"[\"“‘']([^\"”’']{3,})[\"”’']")
+
+
+def _same_words(a: str, b: str) -> bool:
+    w = lambda t: re.findall(r"[a-z]+", t.lower().replace("’", "'").replace("n't", " not"))  # noqa: E731
+    return w(a) == w(b)
 
 
 class SpokenFilter:
@@ -82,8 +93,12 @@ class SpokenFilter:
       sin relación con una corrección o una palabra nueva (salvo traducir la pregunta si el alumno no la entendió),
       y como máximo se deja uno por respuesta."""
 
-    def __init__(self, target_terms: list[str], allow_question: bool = False, teaching: bool = False):
+    def __init__(self, target_terms: list[str], allow_question: bool = False, teaching: bool = False,
+                 has_errors: bool = False, one_question: bool = False):
         self.terms = [t.lower() for t in target_terms]
+        self.has_errors = has_errors  # la respuesta del alumno tiene errores seguros: nada de "Perfect!"
+        self.one_question = one_question  # conversación: una sola pregunta por turno (en los ejercicios no se aplica)
+        self.asked = False
         self.allow_question = allow_question  # el alumno no entendió: vale traducir la pregunta (una vez)
         self.teaching = teaching  # explicando la regla del día: se permiten dos frases en español, algo más largas
         self.max_spans = 2 if teaching else 1
@@ -109,8 +124,30 @@ class SpokenFilter:
 
         s = _ES_SPAN.sub(keep, s)
         s = re.sub(r"\s{2,}", " ", s).strip()
+        while re.search(r"[.!?,]\s+[.,]", s):  # ". ." que dejan las etiquetas quitadas
+            s = re.sub(r"([.!?,])\s+[.,]", r"\1", s)
+        s = re.sub(r"\s+([.,!?])", r"\1", s)
+        english = re.sub(r"<es>.*?</es>", "", s, flags=re.S).strip()
+        if english and self._drop(english):
+            return ""
+        if english.endswith("?") and len(english.split()) >= 6:  # "3 a.m.? Really?" no cuenta como la pregunta
+            self.asked = True
         self.prev = s
         return s
+
+    def _drop(self, english: str) -> bool:
+        """Frases que no deben sonar: elogios falsos, correcciones que no cambian nada, una segunda pregunta."""
+        if self.asked and self.one_question:
+            return True  # ya hizo su pregunta: lo que venga detrás (otra pregunta, otra tarea) sobra
+        if _GRAMMAR_PRAISE.search(english):
+            return True
+        if self.has_errors and _PRAISE.search(english) and len(english.split()) <= 8:
+            return True
+        quoted = _QUOTED.findall(english)
+        if len(quoted) >= 2 and _same_words(quoted[0], quoted[1]) and re.search(
+                r"instead|could say|can say|should say|better|say", english, re.I):
+            return True
+        return False
 
 
 def visible_text(text: str) -> str:
@@ -159,6 +196,7 @@ class ConversationAgent:
         self.last_phase: str | None = None
         self.last_tutor_text = ""
         self.progress_hint = ""  # para el cierre: cómo van los ejercicios de hoy
+        self.openers: list[str] = []  # cómo empezó cada respuesta: para no repetir siempre el mismo elogio
 
     def build_request(self, user_text: str, elapsed: float, phase: str, extra_notes: list[str],
                       practice_items: list[str]) -> list[dict]:
@@ -169,6 +207,10 @@ class ConversationAgent:
         if phase != self.last_phase or phase in ("review", "wrapup"):
             note.append(phase_instruction(phase, self.plan, practice_items, self.progress_hint))
         note.extend(extra_notes)
+        recent = list(dict.fromkeys(self.openers[-6:]))
+        if recent:
+            note.append("[Vary how you react: don't start with or reuse these phrases: "
+                        + "; ".join(f"\"{o}\"" for o in recent) + "]")
         self.messages = compact_history(self.messages)
         return self.messages + [
             {"role": "user", "content": user_text},
@@ -192,3 +234,6 @@ class ConversationAgent:
         self.messages = request + [{"role": "assistant", "content": content}]
         self.last_phase = phase
         self.last_tutor_text = visible_text(raw_text)
+        first = re.split(r"(?<=[.!?])\s+", self.last_tutor_text, maxsplit=1)[0].strip()
+        if first and len(first.split()) <= 8 and not first.endswith("?"):
+            self.openers.append(first)
