@@ -9,12 +9,14 @@ recurrentes, una estructura débil de antes y, de vez en cuando, una pregunta de
 
 from __future__ import annotations
 
+import dataclasses
 import random
 import time
 from dataclasses import asdict, dataclass, field
 
 from .curriculum import GRAMMAR, SCENARIOS_BY_KEY
 from .memory import UserMemory
+from .roleplays import ROLEPLAYS_BY_KEY
 from .route import ROUTE, ROUTE_BY_KEY, TALK, unit_index, unit_status
 from .srs import DAY
 
@@ -52,6 +54,9 @@ class LessonPlan:
     production_scenario: str = ""  # contexto concreto de la conversación libre
     talk: list[str] = field(default_factory=list)  # preguntas para la conversación real, en orden
     deck: list[dict] = field(default_factory=list)  # frases del mazo que tocan repasar hoy [{better, said, why_es}]
+    mode: str = "unit"  # unit (clase de la ruta) | roleplay (práctica profesional libre)
+    roleplay_info: dict = field(default_factory=dict)  # RolePlay como dict (sólo en modo roleplay)
+    pron_words: list[str] = field(default_factory=list)  # palabras que le cuesta pronunciar (para el repaso)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -197,7 +202,21 @@ def plan_next_lesson(memory: UserMemory, now: float | None = None) -> LessonPlan
         production_scenario=f"{unit.production} Setting: {scenario.title}.",
         talk=_rotate(list(TALK.get(unit.key, ())), (unit_lesson - 1) * 2),
         deck=[{k: p[k] for k in ("better", "said", "why_es", "sentence")} for p in memory.due_phrases(now, limit=3)],
+        pron_words=[w["word"] for w in memory.pron_words(limit=2)],
     )
+
+
+def plan_roleplay(memory: UserMemory, key: str, now: float | None = None) -> LessonPlan:
+    """Clase de role-play profesional: fuera de la ruta (no cuenta para dominar la unidad), sin presentación ni
+    ejercicios. Conserva lo personal: errores recurrentes, mazo de frases y vocabulario que toca repasar."""
+    rp = ROLEPLAYS_BY_KEY[key]
+    base = plan_next_lesson(memory, now)
+    return dataclasses.replace(
+        base, mode="roleplay", roleplay_info=rp.to_dict(), title=rp.title, situation=rp.scene, roleplay=True,
+        scenario_key=rp.key, domain="work", weekly_goal=rp.title_es, unit={}, drills=[], focus=[], review_unit=None,
+        just_mastered=None, new_vocab=[], target_grammar=[], review_vocab=base.review_vocab[:3],
+        production_scenario=f"Role-play. You are {rp.tutor_role}. {rp.scene}", talk=list(rp.beats),
+        adaptation_notes=[n for n in base.adaptation_notes if "unit" not in n])
 
 
 def _rotate(items: list, k: int) -> list:

@@ -18,18 +18,26 @@ from typing import AsyncIterator, TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
+from .compact import compact_chat, compact_parse_system, compact_tutor_system
+
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
 class OllamaLLM:
-    def __init__(self, model: str, base_url: str = "http://127.0.0.1:11434", num_ctx: int = 8192):
+    def __init__(self, model: str, base_url: str = "http://127.0.0.1:11434", num_ctx: int = 8192,
+                 compact: bool | None = None):
         self.model = model
+        # Modelo afinado para el tutor (training/): prompts compactos, con los que se entrenó (compact.py).
+        env = os.environ.get("TUTOR_COMPACT_PROMPTS", "auto")
+        self.compact = compact if compact is not None else (
+            env == "1" or (env == "auto" and model.split("/")[-1].startswith("tutor-sam")))
         self.base_url = base_url.rstrip("/")
         self.num_ctx = num_ctx
         self.client = httpx.AsyncClient(base_url=self.base_url, timeout=httpx.Timeout(120.0, connect=3.0))
         self.last_assistant_content: str | None = None
         self._think_param = True  # se desactiva si el modelo no admite el parámetro "think"
+        self._format_ok = True  # se desactiva si el servidor no admite salida estructurada (motor MLX)
         self._chats = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -95,7 +103,10 @@ class OllamaLLM:
             self._preempted = True
             self._eval_task.cancel()
         try:
-            msgs = [{"role": "system", "content": system}] + [_flatten(m) for m in messages]
+            history = [_flatten(m) for m in messages]
+            if self.compact:
+                system, history = compact_tutor_system(system), compact_chat(history)
+            msgs = [{"role": "system", "content": system}] + history
             resp = await self._post(self._body(msgs, stream=True), stream=True)
             parts: list[str] = []
             try:
@@ -133,19 +144,60 @@ class OllamaLLM:
             raise TimeoutError("evaluación interrumpida demasiadas veces")
 
     async def _parse_once(self, system: str, user: str, schema: type[T]) -> T:
-        msgs = [{"role": "system", "content": system + "\nAnswer ONLY with JSON that matches the schema."},
-                {"role": "user", "content": user}]
+        msgs = parse_messages(compact_parse_system(system) if self.compact else system, user, schema)
         last_err: Exception | None = None
         for _ in range(2):
-            resp = await self._post(self._body(msgs, stream=False, fmt=schema.model_json_schema(), temperature=0.1),
-                                    stream=False)
+            fmt = schema.model_json_schema() if self._format_ok else None
+            try:
+                resp = await self._post(self._body(msgs, stream=False, fmt=fmt, temperature=0.1), stream=False)
+            except RuntimeError as e:
+                # El motor MLX de Ollama (modelos importados de safetensors, p. ej. el tutor afinado) no admite
+                # salida estructurada: el modelo afinado ya responde con el JSON exacto, se valida igual.
+                if fmt is not None and "structured output" in str(e):
+                    self._format_ok = False
+                    continue
+                raise
             data = json.loads(await resp.aread())
             await resp.aclose()
             try:
-                return schema.model_validate_json(data["message"]["content"])
+                return schema.model_validate_json(extract_json(data["message"]["content"]))
             except ValidationError as e:
                 last_err = e
         raise ValueError(f"JSON no válido del modelo local: {last_err}")
+
+
+def schema_hint(schema: type[BaseModel]) -> str:
+    """Forma compacta del JSON esperado: {"errors": [{"original": string, "severity": "major"|"minor", ...}]}.
+    Va siempre en el prompt (también se usó así para entrenar el modelo afinado del tutor)."""
+    full = schema.model_json_schema()
+    defs = full.get("$defs", {})
+
+    def render(node: dict) -> str:
+        if "$ref" in node:
+            return render(defs[node["$ref"].split("/")[-1]])
+        if "enum" in node:
+            return "|".join(json.dumps(v) for v in node["enum"])
+        if "anyOf" in node:
+            return render(next(n for n in node["anyOf"] if n.get("type") != "null"))
+        t = node.get("type")
+        if t == "object":
+            return "{" + ", ".join(f'"{k}": {render(v)}' for k, v in node.get("properties", {}).items()) + "}"
+        if t == "array":
+            return "[" + render(node.get("items", {})) + ", ...]"
+        return {"string": "string", "integer": "int", "number": "number", "boolean": "true|false"}.get(t, "value")
+
+    return render(full)
+
+
+def parse_messages(system: str, user: str, schema: type[BaseModel]) -> list[dict]:
+    return [{"role": "system", "content": system + "\nAnswer ONLY with JSON in this format: " + schema_hint(schema)},
+            {"role": "user", "content": user}]
+
+
+def extract_json(text: str) -> str:
+    """Quita lo que un modelo pueda poner alrededor del JSON (```json ... ```, texto antes o después)."""
+    start, end = text.find("{"), text.rfind("}")
+    return text[start:end + 1] if start != -1 and end > start else text
 
 
 def _flatten(m: dict) -> dict:

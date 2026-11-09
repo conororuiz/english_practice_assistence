@@ -132,3 +132,22 @@ svg.spark circle { fill: var(--accent); }
 .deck li { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid rgba(127,127,127,.15); }
 .deck li.due { font-weight: 500; }
 .deck .play { padding: 2px 8px; }
+
+/* Tanda 3: role-plays, racha, pronunciación, informe */
+.streak { font-size: 14px; font-weight: 600; margin-left: 8px; padding: 2px 8px; border-radius: 999px; background: rgba(249,115,22,.12); color: #ea580c; }
+.streak.warn { outline: 1px dashed #ea580c; }
+.rp-picker { max-width: 560px; margin: 0 auto 12px; text-align: center; }
+.rp-head { font-size: 14px; margin-bottom: 8px; }
+.chip.rp { cursor: pointer; border: 1px solid rgba(127,127,127,.3); background: transparent; color: inherit; font: inherit; font-size: 13px; }
+.chip.rp.on { border-color: #3b82f6; background: rgba(59,130,246,.12); }
+.goals, .phrases, .listen { margin: 4px 0 0; padding-left: 18px; text-align: left; }
+.goals li, .phrases li, .listen li { margin: 3px 0; }
+.listen { list-style: none; padding-left: 0; }
+.cal { display: grid; grid-template-columns: repeat(14, 16px); gap: 4px; }
+.cal i { width: 16px; height: 16px; border-radius: 4px; background: rgba(127,127,127,.15); }
+.cal i.on { background: #f97316; }
+a.dl { display: inline-block; text-decoration: none; padding: 10px 16px; border-radius: 999px; }
+
+/* Pausa: la clase queda congelada */
+#pause.on { border-color: var(--accent, #6aa0ff); }
+body.is-paused .orb { opacity: 0.35; filter: grayscale(1); transition: opacity 0.2s, filter 0.2s; }

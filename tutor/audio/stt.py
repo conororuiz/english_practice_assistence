@@ -3,7 +3,8 @@
 Dos motores con la misma interfaz:
 - **MLX** (Apple Silicon, por defecto): Whisper large-v3-turbo cuantizado a 4 bits en la GPU. Mucho más preciso
   con acento español que small.en y con la misma latencia (~1 s por llamada) y memoria (~0.5 GB).
-- **faster-whisper** (CTranslate2, CPU): small.en int8, para equipos sin Apple Silicon.
+- **faster-whisper** (CTranslate2): con GPU NVIDIA usable, large-v3-turbo en float16 (CUDA); si no, small.en int8
+  en CPU. Se decide solo al arrancar (`resolve_stt`); si CUDA falla al cargar, vuelve a la CPU.
 
 La lección transcribe el turno ENTERO hasta la pausa actual (no trozo a trozo): Whisper procesa siempre una
 ventana de 30 s, así que cuesta lo mismo y con el contexto completo acierta mucho más.
@@ -11,8 +12,12 @@ ventana de 30 s, así que cuesta lo mismo y con el contexto completo acierta muc
 
 from __future__ import annotations
 
+import glob
 import logging
+import os
+import platform
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -110,13 +115,72 @@ def _prompt(context: str, disfluent: bool = True) -> str:
     return ((_DISFLUENT_PROMPT + " " if disfluent else "") + context)[-600:].strip() or None
 
 
-class SpeechToText:
-    """faster-whisper (CTranslate2, CPU)."""
+MLX_TURBO = "whisper-large-v3-turbo-q4-mlx"
+CT2_TURBO = "faster-whisper-large-v3-turbo"
+CT2_SMALL = "faster-whisper-small.en"
 
-    def __init__(self, model_dir: str, threads: int = 4):
+
+def _preload_cuda_libs() -> None:
+    """cuBLAS/cuDNN de los paquetes pip nvidia-* (extra `cuda`): CTranslate2 los busca por nombre en el sistema, así
+    que se cargan antes a mano (sin tener que exportar LD_LIBRARY_PATH)."""
+    import importlib.util
+
+    spec = importlib.util.find_spec("nvidia")
+    if not spec or not spec.submodule_search_locations:
+        return
+    for base in spec.submodule_search_locations:
+        if sys.platform == "win32":
+            for d in glob.glob(os.path.join(base, "*", "bin")):
+                os.add_dll_directory(d)
+            continue
+        import ctypes
+
+        libs = sorted(glob.glob(os.path.join(base, "*", "lib", "lib*.so*")))
+        # primero las que otras necesitan (cublasLt antes que cublas, cudnn base antes que sus motores)
+        libs.sort(key=lambda p: (0 if "cublasLt" in p else 1 if "cublas" in p else 2 if "libcudnn.so" in p else 3))
+        for lib in libs:
+            try:
+                ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
+
+
+_cuda: bool | None = None
+
+
+def cuda_available() -> bool:
+    """Hay GPU NVIDIA con driver y CTranslate2 la ve (no comprueba aún cuBLAS/cuDNN: eso lo prueba la carga)."""
+    global _cuda
+    if _cuda is None:
+        _cuda = False
+        if platform.system() != "Darwin":
+            try:
+                _preload_cuda_libs()
+                import ctranslate2
+
+                _cuda = ctranslate2.get_cuda_device_count() > 0
+            except Exception as e:  # noqa: BLE001
+                log.info("CUDA no disponible para Whisper: %s", e)
+    return _cuda
+
+
+class SpeechToText:
+    """faster-whisper (CTranslate2): GPU NVIDIA (float16) si la hay, si no CPU int8. TUTOR_STT_DEVICE=cpu|cuda|auto."""
+
+    def __init__(self, model_dir: str, threads: int = 4, device: str = "auto"):
         from faster_whisper import WhisperModel
 
-        self._model = WhisperModel(model_dir, device="cpu", compute_type="int8", cpu_threads=threads)
+        if device == "auto":
+            device = "cuda" if cuda_available() else "cpu"
+        elif device == "cuda":
+            cuda_available()  # carga cuBLAS/cuDNN de pip si están
+        self.device, self.name = device, Path(model_dir).name
+        compute = "float16" if device == "cuda" else "int8"
+        self._model = WhisperModel(model_dir, device=device, compute_type=compute, cpu_threads=threads)
+        if device == "cuda":  # sin cuBLAS/cuDNN el fallo salta en la primera inferencia, no al cargar: probarla ya
+            list(self._model.transcribe(np.zeros(16000, dtype=np.float32), language="en", beam_size=1)[0])
+        # El prompt con muletillas ayuda a small.en pero empeora large-v3-turbo (ver _DISFLUENT_PROMPT).
+        self._disfluent = "large" not in Path(model_dir).name
 
     def transcribe(self, audio: np.ndarray, context: str = "") -> Transcript:
         """Transcribe voz (float32, 16 kHz). `context` = pregunta del tutor / texto previo del turno."""
@@ -128,7 +192,7 @@ class SpeechToText:
             beam_size=1,
             temperature=[0.0, 0.2, 0.4],  # si sale un bucle de repetición (compression ratio alto), reintenta
             compression_ratio_threshold=2.2,
-            initial_prompt=_prompt(context),
+            initial_prompt=_prompt(context, disfluent=self._disfluent),
             condition_on_previous_text=False,
             vad_filter=False,  # ya segmentamos con Silero
             word_timestamps=True,
@@ -201,7 +265,19 @@ class MLXSpeechToText:
         return Transcript(text=text, avg_logprob=float(np.mean(logprobs)) if logprobs else 0.0, unclear=unclear)
 
 
-def load_stt(model_dir: Path, threads: int = 4):
+def resolve_stt(models_dir: Path, name: str = "auto", device: str = "auto") -> tuple[str, str]:
+    """(modelo, dispositivo) según el equipo, sin configurar nada: Apple Silicon → turbo MLX; GPU NVIDIA → turbo
+    CTranslate2 en CUDA; si no → small.en en CPU. Un TUTOR_STT_MODEL / TUTOR_STT_DEVICE explícito manda."""
+    if name != "auto":
+        return name, device
+    if platform.system() == "Darwin" and platform.machine() == "arm64" and (models_dir / MLX_TURBO).exists():
+        return MLX_TURBO, device
+    if device != "cpu" and (models_dir / CT2_TURBO).exists() and (device == "cuda" or cuda_available()):
+        return CT2_TURBO, "cuda"
+    return CT2_SMALL, "cpu" if device == "auto" else device
+
+
+def load_stt(model_dir: Path, threads: int = 4, device: str = "auto"):
     """Elige el motor por el formato del modelo: weights.npz/safetensors → MLX; model.bin → faster-whisper."""
     if (model_dir / "weights.npz").exists() or (model_dir / "weights.safetensors").exists():
         try:
@@ -209,4 +285,15 @@ def load_stt(model_dir: Path, threads: int = 4):
         except ImportError:
             raise RuntimeError(f"{model_dir.name} necesita mlx-whisper (sólo Apple Silicon). "
                                "Usa TUTOR_STT_MODEL=faster-whisper-small.en en otros equipos.") from None
-    return SpeechToText(str(model_dir), threads=threads)
+    try:
+        stt = SpeechToText(str(model_dir), threads=threads, device=device)
+    except Exception as e:  # noqa: BLE001 — p. ej. falta cuBLAS/cuDNN: seguir en CPU antes que no arrancar
+        if device == "cpu":
+            raise
+        small = model_dir.parent / CT2_SMALL  # turbo en CPU sería lento: small.en si está
+        fallback = small if small.exists() else model_dir
+        hint = " Para la GPU: uv sync --extra cuda" if re.search(r"cublas|cudnn|\.so|dll", str(e), re.I) else ""
+        log.warning("Whisper en GPU falló (%s); uso %s en CPU.%s", e, fallback.name, hint)
+        stt = SpeechToText(str(fallback), threads=threads, device="cpu")
+    log.info("Reconocimiento de voz: %s en %s", stt.name, stt.device)
+    return stt

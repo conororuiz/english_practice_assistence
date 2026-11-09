@@ -14,6 +14,7 @@ Sirve para revisar el guion de la clase (pasos, ejercicios, correcciones) y la p
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import asyncio
 import logging
 import sqlite3
@@ -89,10 +90,16 @@ def real_turns(session_id: int, path: str = "data/tutor.db") -> list[str]:
     return [r[0] for r in rows]
 
 
-async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool, replay: list[str] | None = None) -> dict:
+async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool, replay: list[str] | None = None,
+                    roleplay: str | None = None) -> dict:
     sink = Sink()
-    s = settings
-    session = LessonSession(s, FakeModels(), db, llm, sink, local_llm=True)  # type: ignore[arg-type]
+    s, plan = settings, None
+    if roleplay:
+        from tutor.learning.memory import UserMemory
+        from tutor.learning.planner import plan_roleplay
+        plan = plan_roleplay(UserMemory(db), roleplay)
+        s = dataclasses.replace(settings, lesson_seconds=600)
+    session = LessonSession(s, FakeModels(), db, llm, sink, local_llm=True, plan=plan)  # type: ignore[arg-type]
     clock = {"t": 0.0}
     session.elapsed = lambda: clock["t"]  # type: ignore[method-assign]
     session.t0 = time.monotonic()
@@ -142,6 +149,8 @@ async def run_class(llm: OllamaLLM, db: Database, errors: str, verbose: bool, re
     u = summ.get("unit") or {}
     print(f"--- fin {int(clock['t']) // 60:02d}:{int(clock['t']) % 60:02d} · latencia media del profesor "
           f"{sum(latencies) / len(latencies):.1f}s")
+    if summ.get("roleplay"):
+        print("--- objetivos:", [(g["es"], g["ok"]) for g in summ["roleplay"]["goals"]])
     if u:
         print(f"--- unidad: {u['title']} · dominio {u['score_before']}% → {u['score']}% · dominada={u['mastered']} · "
               f"ejercicios bien {u['drills_ok']}/{u['drills_tried']} · usos correctos {u['correct']:.0f}, errores "
@@ -168,6 +177,7 @@ async def main() -> None:
     ap.add_argument("--errors", choices=list(ERRORS), default="mid")
     ap.add_argument("--db", help="BD a usar (por defecto, una temporal nueva)")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--roleplay", help="clave de un role-play (p. ej. daily_standup) en vez de la clase de la ruta")
     ap.add_argument("--replay", type=int, help="id de una clase de data/tutor.db: el alumno repite sus turnos reales")
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING)
@@ -178,7 +188,7 @@ async def main() -> None:
     db = Database(a.db or Path(tempfile.mkdtemp()) / "sim.db")
     try:
         for _ in range(a.classes):
-            await run_class(llm, db, a.errors, a.verbose, real_turns(a.replay) if a.replay else None)
+            await run_class(llm, db, a.errors, a.verbose, real_turns(a.replay) if a.replay else None, a.roleplay)
     finally:
         await llm.unload()
         server.stop()

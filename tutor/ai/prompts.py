@@ -125,6 +125,8 @@ def render_plan(plan: LessonPlan, snapshot: dict) -> str:
         lines.append("- Recurring mistakes (correct these if they appear): " + "; ".join(
             f"\"{m['original']}\" → \"{m['corrected']}\" ({m['count']}x)" for m in plan.recurring_mistakes))
     lines.append("")
+    if plan.mode == "roleplay":
+        return "\n".join(lines + render_roleplay(plan))
     if u:
         lines.append(f"# Today's class (#{plan.lesson_number}) — learning path unit {plan.unit_number} of "
                      f"{plan.unit_count}, class {plan.unit_lesson} of this unit")
@@ -164,6 +166,44 @@ def render_plan(plan: LessonPlan, snapshot: dict) -> str:
     for n in plan.adaptation_notes:
         lines.append(f"- Note: {n}")
     return "\n".join(lines)
+
+
+def render_roleplay(plan: LessonPlan) -> list[str]:
+    rp = plan.roleplay_info
+    lines = [
+        "# TODAY IS DIFFERENT: a professional ROLE-PLAY (not a grammar class)",
+        "There is no presentation and no exercises today. The learner practises a real work situation with you. "
+        "Ignore the parts of your instructions about today's structure: the goal is that the learner communicates "
+        "well in this situation, using the useful phrases.",
+        f"- Situation: {rp['scene']}",
+        f"- Your character during the role-play: {rp['tutor_role']}. Speak like this person would (natural, "
+        "realistic, B1-friendly English), stay in character, react to what the learner says and push the "
+        "conversation forward. Short turns, one question at a time.",
+        "- The learner's goals (they see them on screen): " + "; ".join(g["en"] for g in rp["goals"]),
+        "- Useful phrases (on their screen): " + "; ".join(f"\"{en}\"" for en, _ in rp["phrases"]),
+        "- During the role-play, do NOT correct small mistakes: stay in character. Only if they are stuck or a "
+        "mistake blocks understanding, step out for ONE short sentence (\"Quick tip: …\") and go back in.",
+    ]
+    if plan.review_vocab:
+        lines.append("- Words to recycle if they fit: " + "; ".join(f"'{v['term']}'" for v in plan.review_vocab))
+    for n in plan.adaptation_notes:
+        lines.append(f"- Note: {n}")
+    return lines
+
+
+ROLEPLAY_PHASES = {
+    "warmup": "STEP 1 — SETTING THE SCENE (as their teacher, not yet in character). Greet the learner briefly (by name "
+              "if you know it) and explain today's role-play in 2-3 short sentences: the situation, who you will be "
+              "and their role, with ONE short Spanish sentence inside <es>…</es> that sums it up: \"{scene_es}\". "
+              "Tell them their goals and some useful phrases are on the screen. Ask if they are ready.",
+    "produce": "STEP 2 — ROLE-PLAY. You are now {tutor_role}. Stay in character. Context: {production}",
+    "review": "STEP 3 — FEEDBACK. Step out of the role-play (\"OK, let's stop there. Great job!\"). As their teacher, "
+              "give short, specific feedback: one thing they did well in the conversation, then work on ONE item per "
+              "turn from the list below (say the better way and ask them to say it). Items:\n{items}",
+    "wrapup": "STEP 4 — CLOSING. A very short spoken closing (under 60 words): how the role-play went, one phrase "
+              "they used well, one thing to practise{progress}. Tell them their summary is on the screen and say "
+              "goodbye warmly. Do NOT ask any more questions.",
+}
 
 
 def tutor_system(plan: LessonPlan, snapshot: dict) -> str:
@@ -264,6 +304,13 @@ def produce_reminder(plan: LessonPlan, question: str | None, follow_ups: int, mi
            "start another topic or say goodbye: the class continues. ")
     react = ("React to ONE specific detail of their answer (if you repeat their idea, say it in correct English; if "
              "something doesn't make sense, ask about it)")
+    if plan.mode == "roleplay":
+        rp = plan.roleplay_info
+        txt = (f"[Role-play, about {max(1, round(minutes_left))} more minutes. Stay in character as "
+               f"{rp['tutor_role'].split(',')[0]}. Do NOT give feedback, review or say goodbye yet. Keep the "
+               "conversation on the work situation: if they drift to other topics, react briefly and bring it back, "
+               "like this person would. ")
+        react = "React in character to what they just said (if something isn't clear, ask about it, like this person would)"
     if question and follow_ups >= 2:
         txt += f"{react}, then ask this new question: \"{question}\""
     elif question:
@@ -276,6 +323,10 @@ def produce_reminder(plan: LessonPlan, question: str | None, follow_ups: int, mi
 
 def phase_instruction(phase: str, plan: LessonPlan, practice_items: list[str], progress: str = "") -> str:
     items = "\n".join(f"- {i}" for i in practice_items) or "- Recycle today's structure and words in new questions."
+    if plan.mode == "roleplay" and phase in ROLEPLAY_PHASES:
+        rp = plan.roleplay_info
+        return ROLEPLAY_PHASES[phase].format(scene_es=rp["scene_es"], tutor_role=rp["tutor_role"],
+                                             production=plan.production_scenario, items=items, progress=progress)
     return PHASES[phase].format(warmup=warmup_instruction(plan), teach="Follow the step in the notes.",
                                 production=plan.production_scenario or plan.situation, items=items, progress=progress)
 

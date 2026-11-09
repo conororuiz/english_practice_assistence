@@ -1,0 +1,16 @@
+# Modelo del tutor (Qwen3.5 afinado con training/). Plantilla = training/scripts/fmt.py: cada mensaje, también las
+# notas de sistema a mitad de conversación, como <|im_start|>rol ... <|im_end|>, y la respuesta tras un bloque de
+# pensamiento vacío (sin razonamiento: latencia mínima).
+FROM ../merged/tutor-sam
+TEMPLATE """{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+"""
+PARAMETER stop <|im_end|>
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER top_k 40

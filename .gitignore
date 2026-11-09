@@ -7,3 +7,13 @@ data/
 .env
 *.pyc
 models/whisper-large-v3-turbo-q4-mlx/
+# entrenamiento del modelo propio: pesos, datos generados y entornos (nunca al repo)
+training/.venv/
+training/base/
+training/merged/
+training/adapters/
+training/data/
+.DS_Store
+training/gguf/
+*.gguf
+.superpowers/

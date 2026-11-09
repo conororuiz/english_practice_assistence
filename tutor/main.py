@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -20,7 +21,10 @@ from .config import ROOT, settings
 from .learning.db import Database
 from .learning.fluency import fluency_index
 from .learning.memory import UserMemory
-from .learning.planner import plan_next_lesson
+from .learning.planner import plan_next_lesson, plan_roleplay
+from .learning.pronunciation import pron_tip
+from .learning.report import build_report
+from .learning.roleplays import ROLEPLAYS, ROLEPLAYS_BY_KEY
 from .learning.route import ROUTE
 from .session.lesson import LessonSession
 from .session.models import Models, rss_mb
@@ -113,9 +117,32 @@ async def profile():
                       for v in vocab["items"][:60]],
             "next_plan": plan_next_lesson(mem).to_dict(),
             "route": _route(mem),
+            "streak": mem.streak(),
+            "pron_words": [{**w, "tip": pron_tip(w["word"])} for w in mem.pron_words(limit=15)],
             "phrases": [{k: p[k] for k in ("better", "said", "why_es", "sentence", "box", "next_due", "best_score")}
                         for p in mem.phrases()],
             "last_summary": sessions[0]["summary"] if sessions else None}
+
+
+@app.get("/api/roleplays")
+async def roleplays():
+    return [{k: v for k, v in r.to_dict().items() if k not in ("tutor_role", "scene", "beats")} for r in ROLEPLAYS]
+
+
+@app.get("/api/report/{session_id}")
+async def report(session_id: int):
+    """Informe de una clase con el audio de las frases corregidas (HTML autónomo, para guardar o compartir)."""
+    assert state.db is not None and state.models is not None
+    row = state.db.one("SELECT summary_json, started_at FROM sessions WHERE id=? AND status='completed'", (session_id,))
+    if row is None:
+        return JSONResponse({"error": "clase no encontrada"}, status_code=404)
+    summary = json.loads(row["summary_json"] or "{}")
+    tts_fn = state.models.tts.synthesize
+    html = await asyncio.get_running_loop().run_in_executor(state.models.tts_pool, build_report, summary,
+                                                             row["started_at"], tts_fn)
+    name = f"informe-clase-{summary.get('lesson_number', session_id)}.html"
+    return Response(html, media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.get("/api/tts")
@@ -186,8 +213,7 @@ async def lesson_ws(ws: WebSocket):
     async with state.lesson_lock:
         transport = WsTransport(ws)
         assert state.models and state.db
-        session = LessonSession(settings, state.models, state.db, state.llm, transport,
-                                use_llm_for_analysis=state.llm_mode != "mock", local_llm=state.llm_mode == "ollama")
+        session: LessonSession | None = None  # se crea al pulsar «Empezar» (clase de la ruta o role-play)
         await transport.send_json({"type": "hello", "llm": state.llm_mode})
         try:
             while True:
@@ -195,30 +221,48 @@ async def lesson_ws(ws: WebSocket):
                 if msg.get("type") == "websocket.disconnect":
                     break
                 if msg.get("bytes") is not None:
-                    await session.on_audio(msg["bytes"])
+                    if session is not None:
+                        await session.on_audio(msg["bytes"])
                 elif msg.get("text"):
                     data = json.loads(msg["text"])
                     kind = data.get("type")
-                    if kind == "start" and not session.t0:
+                    if kind == "start" and session is None:
+                        session = _new_session(transport, data)
                         await session.start()
+                        continue
+                    if session is None:
+                        continue
                     elif kind == "playback_done":
                         await session.on_playback_done(int(data.get("reply_id", 0)))
                     elif kind == "end":
                         await session.stop("user_ended")
-                    elif kind in ("help", "translate", "repeat", "slower", "repeat_phrase"):
+                    elif kind in ("help", "translate", "repeat", "slower", "repeat_phrase", "pause", "resume"):
                         await session.on_command(kind, data)
-                if session.finished and session.summary is not None:
+                if session is not None and session.finished and session.summary is not None:
                     break
         except WebSocketDisconnect:
             pass
         finally:
-            transport.closed = transport.closed or False
-            if not session.finished:
+            if session is not None and not session.finished:
                 await session.stop("disconnected")
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+ROLEPLAY_SECONDS = 600  # un role-play dura 10 minutos
+
+
+def _new_session(transport: WsTransport, data: dict) -> LessonSession:
+    assert state.models and state.db
+    s, plan = settings, None
+    key = str(data.get("roleplay") or "")
+    if key in ROLEPLAYS_BY_KEY:
+        plan = plan_roleplay(UserMemory(state.db), key)
+        s = dataclasses.replace(settings, lesson_seconds=min(settings.lesson_seconds, ROLEPLAY_SECONDS))
+    return LessonSession(s, state.models, state.db, state.llm, transport, use_llm_for_analysis=state.llm_mode != "mock",
+                         local_llm=state.llm_mode == "ollama", plan=plan)
 
 
 def run() -> None:

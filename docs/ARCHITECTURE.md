@@ -484,3 +484,28 @@ si el alumno usó la forma correcta (sube) o repitió el error (vuelve a mañana
 
 Probado: `tests/test_class_helpers.py` (12 tests, incluido uno con modelos reales que pulsa Más despacio, Ayúdame,
 Traducir y Dila tú con audio sintético) y la web en Chrome headless contra Qwen: ayuda en ~5-9 s, traducción ~1.5 s.
+
+## 18. Role-plays profesionales, pronunciación, racha e informe con audio (tanda 3, 2026-11-06)
+
+**Role-plays** (`tutor/learning/roleplays.py`, `plan_roleplay` en el planner): 7 situaciones de trabajo (entrevista de
+desarrollador, daily stand-up, explicar un bug al jefe, reunión de requisitos con un cliente, code review, negociar un
+plazo, small talk antes de una llamada). Se eligen en la pantalla de inicio; duran 10 min y van fuera de la ruta (no
+cuentan para dominar la unidad). Pasos: preparación (escena + papel, una frase en español) → role-play (el profesor
+hace de su personaje, no corrige salvo bloqueo, reconduce si el alumno se va de tema) → feedback (objetivos no
+cumplidos, frases útiles sin usar, errores, mazo) → cierre. Los objetivos se comprueban con reglas sobre lo que dijo el
+alumno y se marcan en el resumen. `scripts/simulate_class.py --roleplay job_interview` para probarlos con Qwen.
+
+**Pronunciación** (`tutor/learning/pronunciation.py`, tabla `pron_words`): sin modelo de fonemas, dos señales — palabras
+con baja confianza de Whisper y, en «Dila tú», palabras de la frase objetivo que Whisper oyó como otra parecida
+("thought" → "taught"). Cada palabra lleva un consejo para hispanohablantes (th, s inicial, -ed, v/b, h, letras
+mudas…). Se ven en el resumen y en Progreso (ordenadas por nº de clases) con 🔊; la más frecuente entra en el repaso.
+
+**Racha** (`UserMemory.streak`): días seguidos con clase (sigue viva si la última fue ayer), récord, clases de la semana
+(objetivo 5) y calendario de 4 semanas. En la cabecera (🔥), en Progreso y en el resumen.
+
+**Informe con audio** (`tutor/learning/report.py`, `/api/report/{id}`): HTML autónomo descargable con cada frase
+corregida y su audio incrustado, la pronunciación, la expresión útil y las cifras de la clase. El resumen tiene también
+«Escucha tus frases corregidas» con 🔊.
+
+Corregido de paso: el nombre del alumno ya no se saca de "call me later"; los comentarios del modelo entre paréntesis
+("(assuming that was your name…)") no se dicen. 101 tests.

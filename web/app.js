@@ -13,6 +13,7 @@ const PHASES = { warmup: "Saludo", teach: "Explicación", drill: "Ejercicios", p
 const ORDER = Object.keys(PHASES);
 
 let ws, micCtx, micNode, micStream, player;
+let roleplays = [], chosenRP = null, lessonMode = "unit";
 let captionsOn = localStorage.getItem("cc") !== "0";
 
 // ---------------------------------------------------------------- reproducción
@@ -91,10 +92,11 @@ async function start() {
 
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/lesson`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "start" }));
+  ws.onopen = () => ws.send(JSON.stringify({ type: "start", roleplay: chosenRP?.key || null }));
   ws.onmessage = (ev) => (typeof ev.data === "string" ? onJson(JSON.parse(ev.data)) : onAudio(ev.data));
   ws.onclose = () => cleanup();
   micNode.port.onmessage = ({ data }) => {
+    if (paused) return;
     if (ws && ws.readyState === 1) ws.send(data.pcm);
     const core = document.querySelector(".orb .core");
     const s = $("orb").className.includes("user") ? 1 + Math.min(data.rms * 6, 0.25) : 1;
@@ -103,7 +105,9 @@ async function start() {
   player.onDone = (id) => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "playback_done", reply_id: id }));
   $("start").classList.add("hidden");
   $("end").classList.remove("hidden");
+  $("pause").classList.remove("hidden");
   $("tools").classList.remove("hidden");
+  $("rp-picker").classList.add("hidden");
 }
 
 function onAudio(buf) {
@@ -121,10 +125,22 @@ function onJson(m) {
       $("lesson-meta").textContent = p.unit
         ? `Clase ${p.lesson_number} · unidad ${p.unit.number} de ${p.unit.count} · ${m.level}`
         : `Clase ${p.lesson_number} · ${p.title} · ${m.level}`;
-      if (p.unit) showToday(p.unit, p.new_vocab);
+      lessonMode = p.mode || "unit";
+      if (p.roleplay) {
+        $("lesson-meta").textContent = `Role-play · ${p.roleplay.title_es} · ${m.level}`;
+        showRoleplay(p.roleplay);
+      } else if (p.unit) showToday(p.unit, p.new_vocab);
+      setStepLabels(lessonMode);
       $("steps").classList.remove("hidden");
       break;
     }
+    case "paused":
+      paused = m.paused;
+      $("pause").textContent = paused ? "▶ Reanudar" : "⏸ Pausa";
+      $("pause").classList.toggle("on", paused);
+      document.body.classList.toggle("is-paused", paused);
+      setStatus(paused ? "En pausa. Pulsa «Reanudar» cuando quieras seguir." : "");
+      break;
     case "state":
       setOrb(m.state);
       if (m.state in STATUS) setStatus(STATUS[m.state]);
@@ -220,10 +236,63 @@ function cleanup() {
   $("start").textContent = "Nueva clase";
   $("steps").classList.add("hidden");
   $("tools").classList.add("hidden");
+  $("pause").classList.add("hidden");
+  $("pause").textContent = "⏸ Pausa";
+  paused = false;
+  document.body.classList.remove("is-paused");
+  $("rp-picker").classList.remove("hidden");
+  chosenRP = null;
+  document.querySelectorAll(".rp").forEach((b) => b.classList.remove("on"));
+  $("start").textContent = "Nueva clase";
   assist("");
   document.querySelectorAll(".say").forEach((b) => b.remove());
   loadToday();
   $("end").classList.add("hidden");
+}
+
+function setStepLabels(mode) {
+  const rp = mode === "roleplay";
+  const labels = rp ? { warmup: "Preparación", produce: "Role-play", review: "Feedback", wrapup: "Cierre" } : PHASES;
+  document.querySelectorAll("#steps li").forEach((li) => {
+    const p = li.dataset.p;
+    li.classList.toggle("hidden", rp && (p === "teach" || p === "drill"));
+    li.textContent = labels[p] || PHASES[p];
+  });
+}
+
+// Role-play: la escena, tu papel, los objetivos y frases útiles (antes y durante la práctica).
+function showRoleplay(r) {
+  const el = $("today");
+  el.innerHTML = `
+    <div class="unit">Role-play profesional · 10 minutos</div>
+    <h2>${esc(r.title_es)}</h2>
+    <p class="goal">${esc(r.scene_es)}</p>
+    <p class="goal"><b>Tu papel:</b> ${esc(r.learner_role_es)}</p>
+    <div class="unit" style="margin-top:10px">Objetivos</div>
+    <ul class="goals">${r.goals.map((g) => `<li>${esc(g.es)} <span class="muted">— ${esc(g.en)}</span></li>`).join("")}</ul>
+    <div class="unit" style="margin-top:10px">Frases útiles</div>
+    <ul class="phrases">${r.phrases.map(([en, es]) => `<li><b>${esc(en)}</b> <span class="muted">${esc(es)}</span></li>`).join("")}</ul>`;
+  el.classList.remove("hidden");
+}
+
+async function loadRoleplays() {
+  try { roleplays = await fetch("/api/roleplays").then((x) => x.json()); } catch { return; }
+  $("rp-list").innerHTML = roleplays.map((r) => `<button class="chip rp" data-key="${esc(r.key)}">${esc(r.title_es)}</button>`).join("");
+  $("rp-list").querySelectorAll(".rp").forEach((b) => (b.onclick = () => chooseRP(b.dataset.key)));
+}
+
+function chooseRP(key) {
+  const r = roleplays.find((x) => x.key === key);
+  const same = chosenRP && chosenRP.key === key;
+  chosenRP = same ? null : r;
+  document.querySelectorAll(".rp").forEach((b) => b.classList.toggle("on", !same && b.dataset.key === key));
+  if (chosenRP) {
+    showRoleplay(chosenRP);
+    $("start").textContent = "Empezar role-play";
+  } else {
+    $("start").textContent = "Empezar clase";
+    loadToday();
+  }
 }
 
 function setStep(phase) {
@@ -252,10 +321,22 @@ function showToday(u, newVocab) {
 async function loadToday() {
   try {
     const r = await fetch("/api/profile").then((x) => x.json());
+    showStreak(r.streak);
+    if (chosenRP) return;
     const p = r.next_plan;
     if (p.unit) showToday({ number: p.unit_number, count: p.unit_count, lesson: p.unit_lesson, title_es: p.unit.title_es,
                             goal: p.unit.goal, form: p.unit.form, score: p.unit_status?.score || 0 }, p.new_vocab);
   } catch {}
+}
+
+function showStreak(st) {
+  if (!st) return;
+  const el = $("streak");
+  el.textContent = `🔥 ${st.current}`;
+  el.title = `Racha: ${st.current} día${st.current === 1 ? "" : "s"} seguidos · récord ${st.best} · esta semana ${st.this_week}/${st.week_goal}` +
+    (st.current && !st.today ? " · ¡haz una clase hoy para no perderla!" : "");
+  el.classList.toggle("warn", !!st.current && !st.today);
+  el.classList.remove("hidden");
 }
 
 function setOrb(s) { $("orb").className = `orb ${s}`; }
@@ -323,8 +404,13 @@ function showSummary(s) {
       ${s.new_vocabulary?.length ? `<h3>📚 New vocabulary</h3><ul>${s.new_vocabulary.map((v) => `<li><b>${esc(v.term)}</b> — ${esc(v.meaning_es)}</li>`).join("")}</ul>` : ""}
       <h3>⚠️ Let's improve</h3><ul>${(s.improve || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
       <h3>💬 Useful expression</h3><p class="expr">"${esc(s.useful_expression)}" <span class="muted">— ${esc(s.useful_expression_es)}</span></p>
+      ${s.roleplay ? `<h3>🎯 Objetivos del role-play</h3><ul class="goals">${s.roleplay.goals.map((g) => `<li>${g.ok ? "✅" : "⬜"} ${esc(g.es)}</li>`).join("")}</ul>` : ""}
       ${deckLine(s.deck)}
+      ${listenSection(s)}
+      ${pronSection(s.pronunciation)}
+      ${s.streak ? `<h3>🔥 Racha</h3><p>${s.streak.current} día${s.streak.current === 1 ? "" : "s"} seguido${s.streak.current === 1 ? "" : "s"} · récord ${s.streak.best} · esta semana ${s.streak.this_week} de ${s.streak.week_goal} clases.</p>` : ""}
       <h3>Next class</h3><p>${esc(s.tomorrow)}</p>
+      ${s.session_id ? `<p><a class="primary dl" href="/api/report/${s.session_id}" download>⬇️ Descargar informe con audio</a></p>` : ""}
       <div class="kpis">
         ${kpi(s.fluency?.speaking_wpm, "palabras/min")}
         ${kpi(s.fluency?.mean_turn_words, "palabras por respuesta")}
@@ -345,6 +431,21 @@ function unitCard(u, next) {
     <div class="bar"><i style="width:${u.score}%"></i></div>
     <span class="muted">Dominio ${u.score_before}% → <b>${u.score}%</b> · ejercicios bien ${u.drills_ok}/${u.drills_tried} ·
       palabras usadas ${u.words_used}/${u.words_total}</span>${missing}</div>`;
+}
+function listenSection(s) {
+  const seen = new Set(), items = [];
+  for (const f of s.feedback || []) for (const x of f.feedback.suggestions || []) {
+    const t = x.sentence || x.better;
+    if (t && !seen.has(t.toLowerCase()) && x.kind !== "richer_answer") { seen.add(t.toLowerCase()); items.push(t); }
+  }
+  if (!items.length) return "";
+  return `<h3>🎧 Escucha tus frases corregidas</h3><ul class="listen">${items.slice(0, 8).map((t) =>
+    `<li><button class="ghost small play" data-text="${esc(t)}">🔊</button> ${esc(t)}</li>`).join("")}</ul>`;
+}
+function pronSection(list) {
+  if (!list?.length) return "";
+  return `<h3>🗣️ Pronunciación</h3><p class="muted">Palabras que costó entender hoy:</p><ul class="listen">${list.map((p) =>
+    `<li><button class="ghost small play" data-text="${esc(p.word)}">🔊</button> <b>${esc(p.word)}</b>${p.heard ? ` <span class="muted">(se entendió «${esc(p.heard)}»)</span>` : ""}<br><span class="muted">${esc(p.tip)}</span></li>`).join("")}</ul>`;
 }
 function deckLine(d) {
   if (!d) return "";
@@ -369,6 +470,8 @@ async function showProgress() {
   $("progress").innerHTML = `
     <h2>Tu progreso</h2>
     <div class="kpis">
+      ${kpi(`🔥 ${r.streak?.current ?? 0}`, `días seguidos (récord ${r.streak?.best ?? 0})`)}
+      ${kpi(`${r.streak?.this_week ?? 0}/${r.streak?.week_goal ?? 5}`, "clases esta semana")}
       ${kpi(s.level, "nivel estimado")}
       ${kpi(s.lessons_completed, "clases")}
       ${kpi(s.vocab.active ?? 0, "palabras activas")}
@@ -380,7 +483,9 @@ async function showProgress() {
     ${Object.keys(s.skills).length ? `<h3>Gramática (dominio)</h3><div class="chips">${Object.entries(s.skills).map(([k, v]) => `<span class="chip">${esc(k.replace(/_/g, " "))} ${Math.round(v * 100)}%</span>`).join("")}</div>` : ""}
     ${s.recurring_mistakes.length ? `<h3>Errores recurrentes</h3><ul>${s.recurring_mistakes.map((m) => `<li>"${esc(m.original)}" → "${esc(m.corrected)}" <span class="muted">(${m.count}×)</span></li>`).join("")}</ul>` : ""}
     ${r.vocab.length ? `<h3>Vocabulario</h3><div class="chips">${r.vocab.map((v) => `<span class="chip ${v.status}" title="${esc(v.meaning_es)}">${esc(v.term)}</span>`).join("")}</div>` : ""}
+    ${calendar(r.streak?.days || [])}
     ${deckSection(r.phrases || [])}
+    ${progressPron(r.pron_words || [])}
     <h3>Próxima clase</h3>
     <p>${esc(plan.unit?.title_es || plan.title)} <span class="muted">(unidad ${plan.unit_number}, clase ${plan.unit_lesson} · ${esc(plan.weekly_goal)})</span></p>
     <h3>Tu ruta</h3>
@@ -392,6 +497,23 @@ async function showProgress() {
     <p class="muted" style="margin-top:14px">Paciencia aprendida: pausa típica ${s.patience.pause_p50.toFixed(1)} s · pausas largas ${s.patience.pause_p90.toFixed(1)} s · multiplicador ×${s.patience.multiplier.toFixed(2)}</p>`;
 }
 
+function calendar(days) {
+  const set = new Set(days), out = [];
+  const today = new Date();
+  for (let i = 27; i >= 0; i--) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    out.push(`<i class="${set.has(key) ? "on" : ""}" title="${key}"></i>`);
+  }
+  return `<h3>Últimas 4 semanas</h3><div class="cal">${out.join("")}</div>`;
+}
+function progressPron(list) {
+  if (!list.length) return "";
+  return `<h3>Pronunciación <span class="muted">(palabras que más cuesta entender)</span></h3><ul class="deck">${list.map((p) => `
+    <li><button class="ghost small play" data-text="${esc(p.word)}">🔊</button>
+      <span><b>${esc(p.word)}</b>${p.heard ? ` <span class="muted">(se entendió «${esc(p.heard)}»)</span>` : ""}<br><span class="muted">${esc(p.tip)}</span></span>
+      <span class="muted">${p.sessions} clase${p.sessions === 1 ? "" : "s"}</span></li>`).join("")}</ul>`;
+}
 function deckSection(items) {
   if (!items.length) return "";
   const now = Date.now() / 1000;
@@ -431,6 +553,15 @@ document.addEventListener("click", (e) => {
   if (b) playText(b.dataset.text);
 });
 $("end").onclick = () => ws && ws.send(JSON.stringify({ type: "end" }));
+let paused = false;
+async function togglePause() {
+  if (!ws || ws.readyState !== 1) return;
+  const on = !paused;
+  // La voz del profesor se congela/sigue en el mismo punto: se suspende el contexto de audio del reproductor.
+  try { on ? await player.ctx.suspend() : await player.ctx.resume(); } catch {}
+  send({ type: on ? "pause" : "resume" });
+}
+$("pause").onclick = togglePause;
 $("nav-lesson").onclick = () => view("lesson");
 $("nav-progress").onclick = () => view("progress");
 $("cc").onclick = () => {
@@ -444,6 +575,9 @@ function applyCC() {
 }
 applyCC();
 loadToday();
+loadRoleplays();
 document.addEventListener("keydown", (e) => {
+  if ((e.key === "p" || e.key === "P") && !e.altKey && !e.ctrlKey && !e.metaKey &&
+      !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) togglePause();
   if (e.key === "d" && e.altKey) $("debug").classList.toggle("hidden"); // Alt+D: panel de detección de turnos
 });

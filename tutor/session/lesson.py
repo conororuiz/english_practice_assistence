@@ -46,7 +46,9 @@ from ..learning.db import Database
 from ..learning.engine import LearningEngine, LiveVocabLog
 from ..learning.fluency import turn_metrics
 from ..learning.memory import UserMemory
-from ..learning.planner import plan_next_lesson
+from ..learning.planner import LessonPlan, plan_next_lesson
+from ..learning.pronunciation import candidate_word, misheard_pairs, pron_tip
+from ..learning.roleplays import ROLEPLAYS_BY_KEY, goals_reached
 from ..learning.route import ROUTE_BY_KEY, attempts_structure, drill_asked, error_is_unit_related
 from .models import Models
 
@@ -93,13 +95,16 @@ def _to_pcm16(audio: np.ndarray) -> bytes:
 
 class LessonSession:
     def __init__(self, settings: Settings, models: Models, db: Database, llm: LLM, transport: Transport,
-                 use_llm_for_analysis: bool = True, user_id: int = 1, local_llm: bool = False):
+                 use_llm_for_analysis: bool = True, user_id: int = 1, local_llm: bool = False,
+                 plan: LessonPlan | None = None):
         self.s = settings
         self.models = models
         self.db = db
         self.t = transport
         self.memory = UserMemory(db, user_id)
-        self.plan = plan_next_lesson(self.memory)
+        self.plan = plan or plan_next_lesson(self.memory)
+        self.roleplay = ROLEPLAYS_BY_KEY.get(self.plan.roleplay_info.get("key", "")) if self.plan.mode == "roleplay" \
+            else None
         self.snapshot = self.memory.snapshot()
         self.agent = ConversationAgent(llm, self.plan, self.snapshot, settings.lesson_seconds)
         self.evaluator = Evaluator(llm if use_llm_for_analysis else None, errors_only=local_llm)
@@ -167,11 +172,19 @@ class LessonSession:
         self.repeat_target: str | None = None  # «Dila tú»: frase que el alumno está repitiendo
         self._repeat_key = ""  # su frase en el mazo (si viene de una corrección)
         self.helps_used = 0
+        self.pron_today: dict[str, str] = {}  # palabra → lo que entendió Whisper (si se sabe)
         self.repeats: list[dict] = []
+        # Pausa (botón ⏸): congela el reloj de la clase y no escucha el micro hasta reanudar.
+        self.paused = False
+        self._pause_t = 0.0
+        self._paused_total = 0.0
 
     # ------------------------------------------------------------------ ciclo de vida
     def elapsed(self) -> float:
-        return time.monotonic() - self.t0 if self.t0 else 0.0
+        if not self.t0:
+            return 0.0
+        now = self._pause_t if self.paused else time.monotonic()
+        return now - self.t0 - self._paused_total
 
     async def start(self) -> None:
         self.t0 = time.monotonic()
@@ -185,6 +198,7 @@ class LessonSession:
                      "title": u.get("title"), "title_es": u.get("title_es"), "goal": u.get("goal"),
                      "form": u.get("form"), "examples": u.get("examples"),
                      "score": self.plan.unit_status.get("score", 0)} if u else None,
+            "mode": self.plan.mode, "roleplay": self.plan.roleplay_info or None,
         }, "level": self.snapshot["level"], "total": self.s.lesson_seconds})
         self._clock_task = _spawn(self._clock_loop())
         self._start_reply("(The learner has joined the voice lesson and is ready.)", user_turn=None)
@@ -195,7 +209,7 @@ class LessonSession:
 
     # ------------------------------------------------------------------ audio entrante
     async def on_audio(self, pcm16: bytes) -> None:
-        if self.finished:
+        if self.finished or self.paused:
             return
         x = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
         self._pending = np.concatenate([self._pending, x])
@@ -339,6 +353,8 @@ class LessonSession:
             flowing = self.user_turns and self.user_turns[-1]["audio"]["words"] >= 20
             phase = "produce" if e < PHASE_END["produce"] + 0.04 and flowing and self.agent.last_phase == "produce" \
                 else "review"  # la conversación va bien: se alarga un poco antes del repaso
+        elif e < PHASE_END["warmup"] and self.warmup_replies < (2 if self.plan.review_unit else 1):
+            phase = "warmup"  # (un role-play no tiene presentación ni ejercicios, pero sí preparación)
         elif e >= PHASE_END["drill"] or self.drill_pos >= len(self.drills) or (
                 self.drill_pos == len(self.drills) - 1 and self.drill_is_asked and not self.drill_retry):
             phase = "produce"  # (o el alumno está respondiendo al último ejercicio: la respuesta ya abre la conversación)
@@ -382,6 +398,19 @@ class LessonSession:
                     seen.add(key)
                     other.append(f"Error: \"{e['original']}\" → \"{e['corrected']}\" ({e['skill_key']})")
         items = (unit_items[:2] + other)[:3]
+        if self.roleplay:  # feedback del role-play: objetivos no cumplidos y frases útiles sin usar
+            said = " ".join(t["text"].lower() for t in self.user_turns)
+            for g, ok in zip(self.roleplay.goals, self._goals()):
+                if not ok:
+                    items.append(f"A goal of the role-play they didn't reach: {g.en}. Show them how (one model "
+                                 "sentence) and ask them to try it.")
+            unused = [en for en, _ in self.roleplay.phrases if en.split("…")[0].strip().lower()[:18] not in said]
+            if unused:
+                items.append(f"A useful phrase they didn't use: \"{unused[0]}\". Ask them to use it in a sentence.")
+        elif self.plan.pron_words and len(items) < 4:
+            w = self.plan.pron_words[0]
+            items.append(f"Pronunciation: say the word '{w}' clearly yourself and ask them to repeat it in a short "
+                         "sentence (it's often hard for them).")
         for p in self.plan.deck[:2]:  # mazo de frases: correcciones de clases anteriores que tocan hoy
             items.insert(min(1, len(items)), f"Phrase from an earlier class: \"{p['better']}\" (they used to say "
                          f"\"{p['said']}\"). Ask a question whose natural answer uses it.")
@@ -391,6 +420,13 @@ class LessonSession:
         if not unit_items and self.unit:
             items.append(f"One more quick question that needs today's structure ({self.unit.form.split(' · ')[0]})")
         return items
+
+    def _goals(self) -> list[bool]:
+        if not self.roleplay:
+            return []
+        texts = [t["text"] for t in self.user_turns if t.get("phase") == "produce"] or \
+            [t["text"] for t in self.user_turns]
+        return goals_reached(self.roleplay, texts)
 
     def _quick_errors(self, text: str) -> list[dict]:
         """Comprobación instantánea con reglas (la evaluación con el LLM llega después): errores seguros."""
@@ -492,6 +528,8 @@ class LessonSession:
                              "or suggest replacements for these words; if the meaning isn't clear, ask what they meant.]")
         if self.turn_idx - self.last_fix_turn <= 1:
             notes.append("[You corrected something in your previous turn: let this turn flow unless an error blocks understanding.]")
+        elif self.roleplay and phase == "produce":
+            self.pending_focus.clear()  # durante el role-play no se corrige: el feedback va después
         elif self.pending_focus and phase in ("produce", "review") and (
                 self.plan.correction_intensity != "light" or any("Today's structure" in f for f in self.pending_focus)):
             notes.append("[From the learner's recent answers (not corrected yet): " + "; ".join(self.pending_focus[:2])
@@ -502,7 +540,7 @@ class LessonSession:
             if missing:
                 notes.append(f"[Today's words still to introduce (teach one when it fits): {', '.join(missing)}]")
         review_error = False
-        if phase in ("produce", "review") and user_turn:
+        if phase in ("produce", "review") and user_turn and not (self.roleplay and phase == "produce"):
             errs = self._quick_errors(user_turn.get("text", ""))
             unit_errs = [e for e in errs if self._unit_error(e)]
             if unit_errs and phase == "review" and not self.review_retry:
@@ -548,7 +586,12 @@ class LessonSession:
 
     def _start_reply(self, user_text: str, user_turn: dict | None, speculative: bool = False, hold: float = 0.0) -> None:
         phase = self._phase()
-        if phase == "wrapup":
+        if phase == "wrapup" and self.roleplay:
+            reached = self._goals()
+            done = [g.en for g, ok in zip(self.roleplay.goals, reached) if ok]
+            self.agent.progress_hint = (f" (they reached {len(done)} of {len(reached)} goals"
+                                        + (f": {'; '.join(done)}" if done else "") + " — use exactly these numbers)")
+        elif phase == "wrapup":
             ok, tried = self._drill_results()
             self.agent.progress_hint = (f" (today they got {ok} of {tried} exercises right — use exactly these numbers"
                                         + ("" if ok == tried else "; don't say they got all of them right") + ")"
@@ -662,6 +705,7 @@ class LessonSession:
             ut["drill"] = self.drills[self.drill_pos]  # respuesta a un ejercicio guiado
         self.turn_idx += 1
         ut["idx"] = self.turn_idx
+        ut["phase"] = self._phase()
         ut["turn_id"] = self.db.add_turn(self.session_id, self.turn_idx, "user", ut["text"], self._phase(),
                                          ut["t_start"], ut["t_start"] + ut["audio"]["total_time"], ut["audio"])
         self.user_turns.append(ut)
@@ -812,6 +856,11 @@ class LessonSession:
         """Botones de la pantalla. Nunca bloquean el bucle del audio: lo lento va en una tarea aparte."""
         if self.finished or not self.t0:
             return
+        if kind in ("pause", "resume"):
+            await self._set_paused(kind == "pause")
+            return
+        if self.paused:
+            return
         if kind == "help":
             _spawn(self._help())
         elif kind == "translate":
@@ -830,6 +879,22 @@ class LessonSession:
             self._repeat_key = str(data.get("key", "")).strip()
             await self.t.send_json({"type": "repeat_start", "target": target})
             _spawn(self._play_extra(f"Listen: {target} Now you.", 0.85))
+
+    async def _set_paused(self, on: bool) -> None:
+        if on == self.paused:
+            return
+        now = time.monotonic()
+        if on:
+            self.paused, self._pause_t = True, now
+            self._pending = self._pending[:0]  # descarta el trozo de audio a medias
+        else:
+            gap = now - self._pause_t
+            self._paused_total += gap
+            self.paused = False
+            r = self.reply
+            if r and r.audible_at:  # el navegador también pausó el audio: el respaldo de fin de audio se desplaza
+                r.audible_at += gap
+        await self.t.send_json({"type": "paused", "paused": self.paused})
 
     async def _play_extra(self, text: str, speed: float | None = None) -> None:
         """Habla fuera del flujo de la clase (repetir una frase, modelo para «Dila tú»): no toca el historial del
@@ -886,6 +951,9 @@ class LessonSession:
         res = compare_repeat(target, said, self._turn_unclear())
         if key:
             self.memory.phrase_result(key, res["score"] >= REPEAT_OK, res["score"])
+        for word, heard in misheard_pairs(res["missing"], res["extra"]):
+            self.memory.add_pron_word(word, self.session_id, heard)
+            self.pron_today[word] = heard
         self.repeats.append({"target": target, "said": said, "score": res["score"]})
         await self.t.send_json({"type": "repeat_result", "target": target, "said": said, **res})
         question = last_question(self.agent.last_tutor_text)
@@ -914,6 +982,8 @@ class LessonSession:
             await asyncio.sleep(0.5)
             e = self.elapsed()
             await self.t.send_json({"type": "clock", "elapsed": round(e, 1), "total": total, "phase": self._phase()})
+            if self.paused:
+                continue
             r = self.reply
             # Respaldo si el navegador no confirma el fin de la reproducción.
             if r and r.finished and self.tutor_speaking and r.audible_at and \
@@ -987,6 +1057,13 @@ class LessonSession:
             await self.t.send_json({"type": "summary", "summary": self.summary})
             return
         deck_review = self._deck_review()
+        for ut in self.user_turns:
+            for w in ut["audio"].get("unclear_words") or []:
+                c = candidate_word(w)
+                if c and c not in self.pron_today:
+                    self.pron_today[c] = ""
+                    self.memory.add_pron_word(c, self.session_id)
+        goals = self._goals()
         lesson_seconds = min(self.elapsed(), self.s.lesson_seconds) or self.s.lesson_seconds
         metrics = self.engine.finalize(self.session_id, self.plan, self.user_turns, self.vocab, lesson_seconds)
         metrics["duration_s"] = round(self.elapsed(), 1)
@@ -1010,7 +1087,15 @@ class LessonSession:
                         "deck": {"added": [s_["better"] for f in feedback for s_ in f["feedback"]["suggestions"]
                                            if s_.get("in_deck")],
                                  "reviewed": deck_review, "repeats": self.repeats},
-                        "helps_used": self.helps_used}
+                        "helps_used": self.helps_used,
+                        "session_id": self.session_id, "mode": self.plan.mode,
+                        "roleplay": {"title_es": self.roleplay.title_es,
+                                     "goals": [{"es": g.es, "en": g.en, "ok": ok}
+                                               for g, ok in zip(self.roleplay.goals, goals)]}
+                        if self.roleplay else None,
+                        "pronunciation": [{"word": w, "heard": h, "tip": pron_tip(w)}
+                                          for w, h in list(self.pron_today.items())[:6]],
+                        "streak": self.memory.streak()}
         self.db.finish_session(self.session_id, metrics, self.summary)
         await self.t.send_json({"type": "summary", "summary": self.summary})
 

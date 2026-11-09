@@ -19,6 +19,13 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
 ]
 
+[project.optional-dependencies]
+# GPU NVIDIA (Linux/Windows): cuBLAS + cuDNN para Whisper en CUDA. `uv sync --extra cuda`; la app lo detecta sola.
+cuda = [
+    "nvidia-cublas-cu12>=12.4 ; sys_platform == 'linux' or sys_platform == 'win32'",
+    "nvidia-cudnn-cu12>=9,<10 ; sys_platform == 'linux' or sys_platform == 'win32'",
+]
+
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",

@@ -202,6 +202,49 @@ class UserMemory:
         rows = self.db.q("SELECT * FROM phrases WHERE user_id=? ORDER BY next_due LIMIT ?", (self.user_id, limit))
         return [dict(r) for r in rows]
 
+    # --- pronunciación ----------------------------------------------------
+    def add_pron_word(self, word: str, session_id: int, heard: str = "", now: float | None = None) -> None:
+        now = now or time.time()
+        word = word.lower().strip(".,!?;:\"'")
+        if not word:
+            return
+        row = self.db.one("SELECT last_session FROM pron_words WHERE user_id=? AND word=?", (self.user_id, word))
+        if row is None:
+            self.db.ex("INSERT INTO pron_words(user_id, word, heard, count, sessions, last_session, last_seen) "
+                       "VALUES(?,?,?,1,1,?,?)", (self.user_id, word, heard, session_id, now))
+        else:
+            new_session = row["last_session"] != session_id
+            self.db.ex("UPDATE pron_words SET count=count+1, sessions=sessions+?, last_session=?, last_seen=?, "
+                       "heard=CASE WHEN ?<>'' THEN ? ELSE heard END WHERE user_id=? AND word=?",
+                       (1 if new_session else 0, session_id, now, heard, heard, self.user_id, word))
+
+    def pron_words(self, limit: int = 20, min_sessions: int = 1) -> list[dict]:
+        """Las que más se repiten (en más clases) primero."""
+        rows = self.db.q("SELECT * FROM pron_words WHERE user_id=? AND sessions>=? "
+                         "ORDER BY sessions DESC, count DESC, last_seen DESC LIMIT ?",
+                         (self.user_id, min_sessions, limit))
+        return [dict(r) for r in rows]
+
+    # --- racha ------------------------------------------------------------
+    def streak(self, now: float | None = None) -> dict:
+        """Días seguidos con al menos una clase completada (la racha sigue viva si la última fue ayer)."""
+        import datetime as dt
+        now = now or time.time()
+        rows = self.db.q("SELECT started_at FROM sessions WHERE user_id=? AND status='completed'", (self.user_id,))
+        days = sorted({dt.date.fromtimestamp(r["started_at"]) for r in rows})
+        today = dt.date.fromtimestamp(now)
+        best = run = 0
+        prev = None
+        for d in days:
+            run = run + 1 if prev is not None and (d - prev).days == 1 else 1
+            best = max(best, run)
+            prev = d
+        current = run if days and (today - days[-1]).days <= 1 else 0
+        monday = today - dt.timedelta(days=today.weekday())
+        week = sum(1 for r in rows if dt.date.fromtimestamp(r["started_at"]) >= monday)
+        return {"current": current, "best": best, "today": bool(days and days[-1] == today), "this_week": week,
+                "week_goal": 5, "days": [d.isoformat() for d in days[-60:]]}
+
     # --- ruta de aprendizaje ---------------------------------------------
     def unit_progress(self, unit_key: str) -> dict | None:
         row = self.db.one("SELECT * FROM unit_progress WHERE user_id=? AND unit_key=?", (self.user_id, unit_key))

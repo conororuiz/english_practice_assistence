@@ -2,6 +2,7 @@
 ya existe. Funciona igual en Windows, Linux y macOS:  uv run python scripts/download_models.py"""
 
 import platform
+import shutil
 import sys
 import urllib.request
 from pathlib import Path
@@ -27,6 +28,11 @@ FILES += [(f"{HF}/Systran/faster-whisper-small.en/resolve/main/{f}", f"faster-wh
 if platform.system() == "Darwin" and platform.machine() == "arm64":
     FILES += [(f"{HF}/mlx-community/whisper-large-v3-turbo-q4/resolve/main/{f}", f"whisper-large-v3-turbo-q4-mlx/{f}")
               for f in ("config.json", "weights.npz")]
+
+# GPU NVIDIA (Linux/Windows): Whisper large-v3-turbo en CTranslate2 (MIT) — 1,6 GB. La app lo usa en CUDA si puede.
+elif shutil.which("nvidia-smi"):
+    FILES += [(f"{HF}/deepdml/faster-whisper-large-v3-turbo-ct2/resolve/main/{f}", f"faster-whisper-large-v3-turbo/{f}")
+              for f in ("config.json", "model.bin", "preprocessor_config.json", "tokenizer.json", "vocabulary.json")]
 
 
 def get(url: str, dest: Path) -> None:

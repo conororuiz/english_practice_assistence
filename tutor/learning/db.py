@@ -130,6 +130,17 @@ CREATE TABLE IF NOT EXISTS phrases (               -- mazo de frases: correccion
     PRIMARY KEY (user_id, better)
 );
 
+CREATE TABLE IF NOT EXISTS pron_words (            -- palabras que la transcripción no entendió bien (posible pronunciación)
+    user_id         INTEGER NOT NULL,
+    word            TEXT NOT NULL,
+    heard           TEXT NOT NULL DEFAULT '',       -- lo que entendió Whisper («Dila tú»), si se sabe
+    count           INTEGER NOT NULL DEFAULT 0,
+    sessions        INTEGER NOT NULL DEFAULT 0,     -- clases distintas en las que pasó
+    last_session    INTEGER,
+    last_seen       REAL NOT NULL,
+    PRIMARY KEY (user_id, word)
+);
+
 CREATE TABLE IF NOT EXISTS vocab_events (
     id              INTEGER PRIMARY KEY,
     user_id         INTEGER NOT NULL,

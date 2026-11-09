@@ -56,13 +56,15 @@ def grounded(fact: str, learner_text: str) -> bool:
     return len(hits) >= min(2, len(words)) and len(hits) * 2 >= len(words)
 
 
-_NAME = re.compile(r"\b(?:my name is|my name's|i'm called|call me)\s+([A-Z][a-záéíóúñ]+)", re.I)
+# La frase sin mayúsculas, pero el nombre con mayúscula ("call me later" no es un nombre).
+_NAME = re.compile(r"\b(?i:my name is|my name's|i'm called|call me)\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)")
+_NOT_NAMES = {"later", "back", "now", "tomorrow", "please", "today", "again", "soon", "tonight"}
 
 
 def name_from(texts: list[str]) -> str:
     for t in texts:
         m = _NAME.search(t)
-        if m:
+        if m and m.group(1).lower() not in _NOT_NAMES:
             return m.group(1).capitalize()
     return ""
 
@@ -99,6 +101,7 @@ class FactExtractor:
             return LearnerFacts(name=name)
         facts = [f.strip() for f in out.facts if f.strip() and len(f.split()) <= 16 and grounded(f, said)]
         model_name = out.name.strip().split(" ")[0].capitalize() if out.name.strip() else ""
-        if model_name and model_name.lower() not in said.lower():
-            model_name = ""
+        if model_name and (model_name.lower() in _NOT_NAMES or not re.search(
+                rf"\b(?i:name is|name's|i'm|i am|call me|this is)\s+{re.escape(model_name)}\b", said)):
+            model_name = ""  # el nombre tiene que haberlo dicho al presentarse ("Later" no es un nombre)
         return LearnerFacts(name=name or model_name, facts=facts[:MAX_NEW_PER_CLASS])

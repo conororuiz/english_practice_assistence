@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <div class="brand">Speak<span>up</span></div>
+    <div class="brand">Speak<span>up</span> <span id="streak" class="streak hidden" title="Días seguidos con clase"></span></div>
     <nav>
       <button id="nav-lesson" class="link active">Lección</button>
       <button id="nav-progress" class="link">Progreso</button>
@@ -18,6 +18,10 @@
   <main id="view-lesson">
     <div id="lesson-meta" class="meta">&nbsp;</div>
     <section id="today" class="today hidden"></section>
+    <section id="rp-picker" class="rp-picker">
+      <div class="rp-head">O practica una situación de trabajo <span class="muted">(role-play, 10 min)</span></div>
+      <div id="rp-list" class="chips"></div>
+    </section>
 
     <div class="stage">
       <svg class="ring" viewBox="0 0 200 200" aria-hidden="true">
@@ -50,6 +54,7 @@
 
     <div class="controls">
       <button id="start" class="primary">Empezar clase</button>
+      <button id="pause" class="ghost hidden" title="Pausa la clase: el reloj se para y no te escucha (tecla P)">⏸ Pausa</button>
       <button id="end" class="ghost hidden">Terminar</button>
       <button id="cc" class="ghost small" title="Subtítulos">CC</button>
     </div>

@@ -110,6 +110,9 @@ class SpokenFilter:
         s = re.sub(r"(\*\*|__|\*|`)", "", sentence)
         s = re.sub(r"^\s*([-•]|\d+\.)\s+", "", s)
         s = re.sub(r"\((?:pause|pauses|smiles?|laughs?|wait[a-z ]*|[A-Z][a-z]+(?: [a-z]+){0,3})\)\s*", "", s)  # acotaciones
+        # comentarios del modelo para sí mismo: "(assuming that was your name based on the greeting)"
+        s = re.sub(r"\s*\((?:assuming|note|i'm|i am|if |based on|as |this is|in character|out of character)[^)]*\)", "", s,
+                   flags=re.I)
 
         def keep(m: re.Match) -> str:
             inner = m.group(1).strip()

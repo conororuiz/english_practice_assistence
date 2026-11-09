@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import psutil
 
 from ..audio.smart_turn import SmartTurn
-from ..audio.stt import MLXSpeechToText, SpeechToText, load_stt
+from ..audio.stt import MLXSpeechToText, SpeechToText, load_stt, resolve_stt
 from ..audio.tts import TextToSpeech
 from ..audio.vad import SileroVAD
 from ..config import Settings
@@ -38,14 +38,15 @@ class Models:
     @classmethod
     def load(cls, s: Settings) -> "Models":
         d = s.models_dir
-        missing = [p for p in (d / s.vad_model, d / s.smart_turn_model, d / s.tts_model, d / "voices-v1.0.bin", d / s.stt_model)
+        stt_name, stt_device = resolve_stt(d, s.stt_model, s.stt_device)
+        missing = [p for p in (d / s.vad_model, d / s.smart_turn_model, d / s.tts_model, d / "voices-v1.0.bin", d / stt_name)
                    if not p.exists()]
         if missing:
             raise FileNotFoundError(f"Faltan modelos: {missing}. Ejecuta: uv run python scripts/download_models.py")
         t0, base = time.time(), rss_mb()
         vad = SileroVAD.load_session(str(d / s.vad_model))
         smart = SmartTurn(str(d / s.smart_turn_model))
-        stt = load_stt(d / s.stt_model, threads=s.stt_threads)
+        stt = load_stt(d / stt_name, threads=s.stt_threads, device=stt_device)
         tts = TextToSpeech(str(d / s.tts_model), str(d / "voices-v1.0.bin"), s.tts_voice_en, s.tts_voice_es, s.tts_speed)
         models = cls(vad, stt, tts, smart, ThreadPoolExecutor(1, thread_name_prefix="stt"),
                      ThreadPoolExecutor(1, thread_name_prefix="tts"))

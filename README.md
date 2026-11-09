@@ -30,8 +30,9 @@ Diseño completo, decisiones y resultados medidos: **[docs/ARCHITECTURE.md](docs
   [Ollama](https://ollama.com). Opcional: la API de Claude (de pago, aparte de la suscripción de Claude) para una
   conversación y una evaluación de más calidad. Sin ninguno de los dos arranca en **modo demo** (tutor guionizado).
 - Chrome, Edge o Safari recientes. **Recomendado: auriculares** (evita que el micrófono capte al tutor).
-- Reconocimiento de voz: en Mac con Apple Silicon usa Whisper large-v3-turbo (MLX); en Windows, Linux y Mac Intel
-  usa Whisper small.en en CPU (algo menos preciso con acento español).
+- Reconocimiento de voz (se elige solo al arrancar): en Mac con Apple Silicon, Whisper large-v3-turbo (MLX); con
+  GPU NVIDIA (Windows/Linux), Whisper large-v3-turbo en CUDA si hiciste `uv sync --extra cuda`; si no, Whisper
+  small.en en CPU (algo menos preciso con acento español). Si la GPU falla al arrancar, sigue en CPU.
 
 ## Instalación paso a paso
 
@@ -61,7 +62,7 @@ cd english-voice-tutor
 ollama pull qwen3.5:4b
 
 # 4. Dependencias de Python y modelos de voz (~830 MB)
-uv sync
+uv sync                      # con GPU NVIDIA: uv sync --extra cuda
 uv run python scripts/download_models.py
 
 # 5. Arrancar
@@ -94,7 +95,7 @@ cd english-voice-tutor
 ollama pull qwen3.5:4b
 
 # 4. Dependencias de Python y modelos de voz (~830 MB)
-uv sync
+uv sync                      # con GPU NVIDIA: uv sync --extra cuda
 uv run python scripts/download_models.py
 
 # 5. Arrancar
@@ -122,7 +123,7 @@ ollama serve &                    # o abre la app Ollama
 ollama pull qwen3.5:4b
 
 # 4. Dependencias de Python y modelos de voz (~830 MB; +464 MB en Apple Silicon)
-uv sync
+uv sync                      # con GPU NVIDIA: uv sync --extra cuda
 uv run python scripts/download_models.py
 
 # 5. Arrancar
@@ -206,6 +207,7 @@ y descomenta lo que quieras cambiar.
 | `TUTOR_TTS_SPEED` | `0.95` | Velocidad del tutor |
 | `TUTOR_LESSON_SECONDS` | `900` | Duración de la clase (los pasos son proporcionales) |
 | `TUTOR_DATA_DIR` | `./data` | Base de datos SQLite del progreso |
+| `TUTOR_STT_MODEL` / `TUTOR_STT_DEVICE` | `auto` / `auto` | Fuerzan el reconocedor (carpeta de `models/`) y `cuda` / `cpu` |
 
 ## Licencias de los modelos
 

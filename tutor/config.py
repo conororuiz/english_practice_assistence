@@ -28,14 +28,6 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
-def _default_stt() -> str:
-    import platform
-
-    if platform.system() == "Darwin" and platform.machine() == "arm64":
-        return "whisper-large-v3-turbo-q4-mlx"
-    return "faster-whisper-small.en"
-
-
 @dataclass(frozen=True)
 class Settings:
     # --- Servidor ---
@@ -57,9 +49,11 @@ class Settings:
     summary_effort: str = _env("TUTOR_SUMMARY_EFFORT", "medium")
 
     # --- Speech (local) ---
-    # Apple Silicon: Whisper large-v3-turbo (4 bits, MLX/GPU). Otros equipos: TUTOR_STT_MODEL=faster-whisper-small.en
-    stt_model: str = _env("TUTOR_STT_MODEL", _default_stt())
+    # "auto": Apple Silicon → Whisper large-v3-turbo MLX; GPU NVIDIA → large-v3-turbo CUDA; si no → small.en CPU
+    # (tutor/audio/stt.py:resolve_stt). Un nombre de carpeta de models/ lo fuerza.
+    stt_model: str = _env("TUTOR_STT_MODEL", "auto")
     stt_threads: int = int(_env("TUTOR_STT_THREADS", "4"))
+    stt_device: str = _env("TUTOR_STT_DEVICE", "auto")  # faster-whisper: auto (CUDA si hay) | cuda | cpu
     tts_model: str = _env("TUTOR_TTS_MODEL", "kokoro-v1.0.onnx")
     tts_voice_en: str = _env("TUTOR_VOICE_EN", "af_heart")
     tts_voice_es: str = _env("TUTOR_VOICE_ES", "ef_dora")
